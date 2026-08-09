@@ -1,0 +1,12 @@
+[Unit]
+Description=Synthesize copied MOZA AB9 telemetry effects from DCS
+After=graphical-session.target ab9-profiled.service
+
+[Service]
+Type=simple
+ExecStart=%h/.local/libexec/ab9-ffb/ab9_telemetryd.py --apply --gain 1 --cap-percent 15
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

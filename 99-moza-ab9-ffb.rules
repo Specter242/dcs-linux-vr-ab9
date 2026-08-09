@@ -1,0 +1,2 @@
+# Register the AB9 with hid-universal-pidff before its HID child enumerates.
+ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="346e", ATTR{idProduct}=="1000", RUN+="/usr/local/libexec/ab9-ffb-setup --new-id-only"

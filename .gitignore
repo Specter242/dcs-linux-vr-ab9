@@ -1,0 +1,26 @@
+# This directory began as a hardware-debug workspace containing multi-gigabyte
+# USB captures, logs, firmware, binaries, screenshots, and copied presets.
+# Publish only this explicit, reviewed allowlist.
+*
+!.gitignore
+!README.md
+!LICENSE
+!PUBLIC_GUIDE.md
+!PUBLIC_AB9_PROTOCOL.md
+!requirements.txt
+!99-moza-ab9-ffb.rules
+!AB9ProfileExport.lua
+!ab9-ffb-setup
+!ab9-ffb-setup.service
+!ab9-profiled.service
+!ab9-telemetryd.service
+!ab9_control.py
+!ab9_profile.py
+!ab9_profiled.py
+!ab9_telemetryd.py
+!moza.py
+!test_ab9_telemetry.py
+!ab9_test.c
+!ab9_spring_test.c
+!ab9_state.c
+!dcs-eye-osc-bridge.py

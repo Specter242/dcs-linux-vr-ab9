@@ -1,0 +1,11 @@
+[Unit]
+Description=Bind MOZA AB9 to the universal HID PID force-feedback driver
+After=systemd-modules-load.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/ab9-ffb-setup
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

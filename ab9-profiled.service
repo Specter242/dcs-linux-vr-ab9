@@ -1,0 +1,13 @@
+[Unit]
+Description=Select copied MOZA AB9 profiles from the current DCS aircraft
+After=graphical-session.target
+
+[Service]
+Type=simple
+Environment=PYTHONUNBUFFERED=1
+ExecStart=%h/.local/libexec/ab9-ffb/ab9_profiled.py --apply --mode native
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
