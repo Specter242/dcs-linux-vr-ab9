@@ -26,7 +26,6 @@ This is an alpha research release intended to make the result auditable and to
 invite testing and contributions. It is not a one-click installer. In
 particular:
 
-- the Bigscreen 2e eye pipeline still needs better fit/calibration diagnostics;
 - the archived OpenXR-Eye-Trackers MinGW patch needs reproducible packaging;
 - telemetry curves need validation across more DCS aircraft and firmware;
 - MOZA aircraft preset files are intentionally not redistributed.

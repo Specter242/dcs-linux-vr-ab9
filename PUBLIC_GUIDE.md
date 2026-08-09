@@ -19,11 +19,13 @@ second in the AH-64D on Syria at 75 Hz, with approximately 85% GPU utilization.
 That is a single-system observation, not a general benchmark. A later visual
 quality increase is described below but has not yet been re-benchmarked.
 
-This is not turnkey yet. The important remaining rough edge on this system is
-eye-tracking calibration stability: the pipeline works, but eyelashes/eyelids
-can obscure the pupils and cause the focus region to drift. The AB9 path works,
-but its profile/configuration integration is community-built and must be
-treated as safety-critical software around a 12 N-m motor.
+This is not turnkey yet because several community components still require
+manual installation and configuration. Eye-tracked foveation works end to end;
+the Beyond 2e eye-tracking hardware/software used here is still beta and, like
+other camera-based trackers, calibration quality can vary with headset fit and
+the individual user. The AB9 path works, but its profile/configuration
+integration is community-built and must be treated as safety-critical software
+around a 12 N-m motor.
 
 ## Tested hardware and software
 
@@ -59,7 +61,7 @@ removed one large variable from the investigation.
 | Lighthouse pose tracking | Working | Monado uses SteamVR's Lighthouse wrapper. |
 | Quad views | Working | DCS reports four views and the layer reports large pixel savings. |
 | Beyond 2e eye cameras | Working | go-bsb-cams supplies an 800x400 MJPEG stream. |
-| Eye-driven focus | Functional, imperfect | End-to-end gaze reaches Quad-Views-Foveated, but physical eye occlusion currently causes drift on this face/headset fit. |
+| Eye-driven focus | Working | End-to-end gaze reaches Quad-Views-Foveated. Calibration remains sensitive to headset fit on the tested beta hardware. |
 | VIRPIL and MFG input | Working | Use Proton HIDRAW for these devices. |
 | AB9 axes/buttons | Working | Exposed through Linux input/evdev. |
 | Native DCS AB9 FFB | Working | Standard DirectInput effects travel through Wine/evdev and `hid-universal-pidff`. |
@@ -270,24 +272,14 @@ Quad-Views-Foveated under Wine. This local build needs to be published as a
 source patch or upstreamed; distributing only the DLL would make the result
 hard to audit and reproduce.
 
-### Eye-calibration caveat
+### Fit and calibration note
 
-Eye tracking is not merely a software-offset problem. A controlled capture on
-this headset showed sharp, uncorrupted camera frames, but eyelashes and eyelids
-frequently covered substantial parts of one or both pupils. The inferred gaze
-then wandered even while the user looked at a fixed center target. A trained
-model can remain present and selected while becoming inaccurate after the
-headset fit changes.
-
-Before retraining:
-
-1. Put the headset on exactly as it will be worn in DCS.
-2. Inspect both raw IR views while looking at a fixed target.
-3. Adjust fit until both pupils remain visible through natural blinks and gaze
-   movement.
-4. Train and validate without moving the headset.
-5. Use a global numerical yaw offset only as a small final correction, not to
-   mask unstable pupil detection.
+The tested Beyond 2e eye-tracking implementation is beta hardware/software.
+Tracking worked, but calibration could shift when headset fit changed. On this
+particular user, eyelashes sometimes obscured the pupils in the raw IR views;
+that is a personal fit/physiology observation rather than a Linux pipeline
+failure. Calibrate with the headset in its normal playing position and reserve
+the bridge's global yaw offset for small, stable corrections.
 
 ## 5. VIRPIL/MFG input versus AB9 force feedback
 
@@ -490,8 +482,9 @@ only while the aircraft is powered off.
 ### Quad views works but the sharp region is misplaced
 
 Confirm live packets in both the eye bridge log and OpenXR-Eye-Trackers log.
-Then inspect raw camera views. A stable numerical bias can be calibrated; an
-unstable or occluded pupil cannot be repaired reliably with a constant offset.
+If the data path is healthy, recalibrate with the headset in its normal playing
+position. A stable numerical bias can be corrected with the bridge offset;
+changing bias is more likely fit or beta-tracker calibration behavior.
 
 ### Apache MPD text/symbols render as solid colored blocks
 
@@ -539,8 +532,8 @@ cycle during this investigation.
    daemon, telemetry daemon, and DCS exporter.
 3. Automated tests for packet parsing, profile mapping, timeouts, and effect
    caps that do not require a motor.
-4. A camera-quality/calibration diagnostic that reports pupil visibility and
-   confidence before training.
+4. Broader Beyond 2e beta eye-tracking testing across different users and
+   headset fits.
 5. More community testing across kernels, GPUs, DCS modules, AB9 firmware
    versions, and alternate MOZA flight bases.
 
