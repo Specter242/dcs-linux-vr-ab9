@@ -16,6 +16,27 @@ The tested machine reached a fully validated 74-76 delivered FPS in an AH-64D
 on Syria at the Beyond's 75 Hz mode. This is one CachyOS/Radeon system, not a
 universal benchmark or an officially supported configuration.
 
+## Tested system
+
+| Component | Tested configuration |
+| --- | --- |
+| CPU | AMD Ryzen 7 9800X3D |
+| GPU | AMD Radeon RX 9070 XT, 16 GB VRAM |
+| Memory | 64 GB RAM |
+| Operating system | CachyOS, KDE Plasma on Wayland |
+| Kernel | Linux `7.1.6-1-cachyos` |
+| Graphics driver | Mesa RADV 26.1.6 |
+| Headset | Bigscreen Beyond 2e at 75 Hz |
+| DCS | Standalone DCS World `2.9.28.26385` |
+| Compatibility layer | `umu-launcher` 1.4.3 with GE-Proton10-17 |
+| OpenXR runtime | Monado `25.1.0.r710.g735e29e4e` |
+| Storage | DCS on a dedicated ext4 NVMe volume |
+
+The 74-76 FPS result used the performance-oriented settings documented in the
+[field guide](PUBLIC_GUIDE.md#8-performance-settings-and-results), including
+FSR 0.66 and the 0.90/38% quad-view configuration. Later visual-quality changes
+have not yet been benchmarked against the same mission.
+
 Start with the [complete field guide](PUBLIC_GUIDE.md). The
 [AB9 protocol and safety notes](PUBLIC_AB9_PROTOCOL.md) cover the force-feedback
 work in detail.
