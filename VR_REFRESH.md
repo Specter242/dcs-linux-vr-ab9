@@ -139,18 +139,23 @@ cc -std=c11 -D_POSIX_C_SOURCE=200809L -O2 -Wall -Wextra \
 - Gaze freshness boundary and corrupt-record tests, shell syntax checks, and
   systemd unit validation passed.
 
-Quad-view menu/mission rendering, Lighthouse pose, in-headset gaze alignment,
-physical force feedback, and new performance numbers still require live
-validation. Both the updated and preserved Proton versions paused at the
-loading screen during initial checks without a valid headset pose. Source
-inspection identified the quad-view layer's indefinite wait for valid views
-in [cacheStereoView](https://github.com/mbucchia/Quad-Views-Foveated/blob/79855a001302472a0f6c0703567dfe8ebfa6f988/openxr-api-layer/layer.cpp#L2750).
-Disabling only the eye layer did not resolve that wait. The native readiness
-check addresses the startup hang without changing the quad-view DLL. Its
-successful-pose path still needs verification with powered, visible base
-stations. The AB9
-reported APP state 2 (internal error) despite DirectInput/FFB being enabled;
-its physical recovery is separate from USB enumeration and driver readiness.
+After the base stations were powered on and the Beyond was placed in view,
+the native readiness check passed with valid position and orientation. Full
+eye-tracked quad views reached the VR main menu on the updated runtime;
+DCS entered the focused OpenXR session state and the Windows eye layer
+accepted fresh direct gaze. WayVR continued capturing the desktop. After the
+user power-cycled the AB9 and let calibration finish, it reported APP state 1
+(free), normal mode, DirectInput, and enabled force output. The launcher's
+native force-feedback readiness check passed.
+
+In-headset gaze alignment, mission rendering, physical force feedback, and
+new performance numbers remain unverified. Initial quad-view startups paused
+without a valid headset pose. Source inspection identified the layer's
+indefinite wait for valid views in
+[cacheStereoView](https://github.com/mbucchia/Quad-Views-Foveated/blob/79855a001302472a0f6c0703567dfe8ebfa6f988/openxr-api-layer/layer.cpp#L2750).
+The native readiness check addresses that startup hang without changing the
+quad-view DLL; both its missing-pose cleanup and successful-pose paths have
+now been verified.
 One diagnostic query for the session state of a non-session libmonado client
 triggered a Monado crash; session queries for control clients were discontinued.
 The launcher stopped DCS, restored the global runtime symlink and monitor
