@@ -1,0 +1,14 @@
+[Unit]
+Description=Beyond 2e eye camera stream for DCS
+PartOf=dcs-eye-tracking.target
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+ExecStart=%h/.local/share/dcs-linux/eye-tracking/bin/go-bsb-cams --port 8080
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=5
+StandardOutput=append:%h/Games/dcs-linux/eye-tracking/camera.log
+StandardError=inherit

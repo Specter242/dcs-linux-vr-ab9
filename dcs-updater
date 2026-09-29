@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly DCS_MOUNT="/mnt/dcs"
+readonly DCS_ROOT="$DCS_MOUNT/Program Files/Eagle Dynamics/DCS World"
+readonly DCS_UPDATER="$DCS_ROOT/bin/DCS_updater.exe"
+readonly DCS_PREFIX="${DCS_PREFIX_PATH:-$HOME/Games/dcs-linux/prefix-ge11}"
+readonly DCS_PROTON="${DCS_PROTON_PATH:-$HOME/Games/dcs-linux/proton/GE-Proton11-7-DCS-MFD}"
+readonly DCS_DRIVE="$DCS_PREFIX/pfx/dosdevices/w:"
+
+mountpoint -q "$DCS_MOUNT" || {
+  printf 'DCS volume is not mounted: %s\n' "$DCS_MOUNT" >&2
+  exit 1
+}
+[[ -w "$DCS_ROOT" ]] || {
+  printf 'DCS installation is not writable: %s\n' "$DCS_ROOT" >&2
+  exit 1
+}
+[[ -f "$DCS_UPDATER" ]] || {
+  printf 'DCS updater is missing: %s\n' "$DCS_UPDATER" >&2
+  exit 1
+}
+[[ -L "$DCS_DRIVE" && "$(readlink -f "$DCS_DRIVE")" == "/mnt" ]] || {
+  printf 'Proton W: drive does not contain %s\n' "$DCS_MOUNT" >&2
+  exit 1
+}
+(( $# > 0 )) || {
+  printf 'Usage: dcs-updater <update|repair|install|uninstall> [arguments...]\n' >&2
+  exit 2
+}
+
+export GAMEID="umu-223750"
+export STORE="none"
+export WINEPREFIX="$DCS_PREFIX"
+export PROTONPATH="$DCS_PROTON"
+export PROTON_USE_XALIA="0"
+export WINE_SIMULATE_WRITECOPY="1"
+export WINEDLLOVERRIDES="wbemprox=n"
+
+cd "$DCS_ROOT/bin"
+exec "$HOME/.local/bin/dcs-umu" "$DCS_UPDATER" "$@"

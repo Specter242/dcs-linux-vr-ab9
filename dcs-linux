@@ -1,0 +1,721 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly DCS_MOUNT="/mnt/dcs"
+readonly DCS_ROOT="$DCS_MOUNT/Program Files/Eagle Dynamics/DCS World"
+readonly DCS_EXE="$DCS_ROOT/bin/DCS.exe"
+readonly DCS_UPDATER="$DCS_ROOT/bin/DCS_updater.exe"
+case "${DCS_RUNTIME:-current}" in
+  current)
+    default_prefix="$HOME/Games/dcs-linux/prefix-ge11"
+    default_proton="$HOME/Games/dcs-linux/proton/GE-Proton11-7-DCS-MFD"
+    default_eye_helper="$HOME/.local/bin/dcs-eye-tracking"
+    ;;
+  legacy)
+    default_prefix="$HOME/Games/dcs-linux/prefix"
+    default_proton="$HOME/Games/dcs-linux/proton/GE-Proton10-17-DCS-MFD"
+    default_eye_helper="$HOME/.local/bin/dcs-eye-tracking"
+    ;;
+  *) printf 'Unknown DCS_RUNTIME: %s\n' "$DCS_RUNTIME" >&2; exit 2 ;;
+esac
+readonly DCS_PREFIX="${DCS_PREFIX_PATH:-$default_prefix}"
+# Dedicated copy of GE-Proton with an integrity-safe DXVK alpha repair for
+# malformed AH-64D cockpit atlases. The Eagle Dynamics files stay untouched.
+readonly DCS_PROTON="${DCS_PROTON_PATH:-$default_proton}"
+readonly DCS_UMU="$HOME/.local/bin/dcs-umu"
+readonly DCS_LOG="$DCS_PREFIX/pfx/drive_c/users/steamuser/Saved Games/DCS/Logs/dcs.log"
+readonly AB9_SETUP="$HOME/.local/libexec/ab9-ffb/ab9_control.py"
+readonly AB9_LOG="$HOME/Games/dcs-linux/ab9-ffb.log"
+readonly DCS_INPUT_SYNC="$HOME/.local/bin/dcs-input-sync"
+readonly DCS_INPUT_SYNC_LOG="$HOME/Games/dcs-linux/input-guid-sync.log"
+readonly DCS_EYE_TRACKING="$default_eye_helper"
+readonly DCS_LAUNCHER_BRIDGE_LOG="$HOME/Games/dcs-linux/launcher-bridge.log"
+readonly MONADO_RUNTIME="/usr/share/openxr/1/openxr_monado.json"
+readonly STEAMVR_RUNTIME="$HOME/.local/share/Steam/steamapps/common/SteamVR/steamxr_linux64.json"
+readonly OPENXR_ACTIVE_RUNTIME="$HOME/.config/openxr/1/active_runtime.json"
+readonly MONADO_LOG="$HOME/Games/dcs-linux/monado.log"
+readonly MONADO_SOCKET="${XDG_RUNTIME_DIR:-/run/user/$UID}/monado_comp_ipc"
+readonly VR_DESKTOP_UUID="a47e8a4d-e5ce-4787-b3c0-49dd6ce67a3c"
+readonly KWIN_OUTPUT_CONFIG="$HOME/.config/kwinoutputconfig.json"
+
+eye_tracking_started=0
+monado_started=0
+monado_pid=""
+monado_input_fd=""
+openxr_runtime_switched=0
+openxr_original_target=""
+display_refresh_changed=0
+display_connector=""
+display_original_mode_id=""
+dcs_pid=""
+launcher_bridge_pid=""
+launcher_bridge_dir=""
+launcher_bridge_request=""
+wayvr_started=0
+
+resolve_vr_desktop_connector() {
+  [[ -r "$KWIN_OUTPUT_CONFIG" ]] || return 1
+  command -v jq >/dev/null || return 1
+
+  jq -r --arg uuid "$VR_DESKTOP_UUID" \
+    '[.. | objects | select(.uuid? == $uuid and .connectorName? != null) |
+      .connectorName][0] // empty' "$KWIN_OUTPUT_CONFIG"
+}
+
+set_vr_desktop_refresh() {
+  command -v kscreen-doctor >/dev/null || return 0
+  command -v jq >/dev/null || return 0
+
+  local display_json output_id target_mode_id
+  display_connector="$(resolve_vr_desktop_connector)" || return 0
+  [[ -n "$display_connector" ]] || return 0
+
+  display_json="$(kscreen-doctor -j 2>/dev/null)" || {
+    printf 'Warning: could not read the current display layout.\n' >&2
+    return 0
+  }
+  output_id="$(jq -r --arg connector "$display_connector" \
+    '.outputs[] | select(.name == $connector and .connected == true and
+      .enabled == true) | .id' <<<"$display_json" | head -n 1)"
+  [[ "$output_id" =~ ^[0-9]+$ ]] || return 0
+
+  display_original_mode_id="$(jq -r --argjson id "$output_id" \
+    '.outputs[] | select(.id == $id) | .currentModeId' \
+    <<<"$display_json")"
+  target_mode_id="$(jq -r --argjson id "$output_id" \
+    '.outputs[] | select(.id == $id) | .modes[] |
+      select(.size.width == 3440 and .size.height == 1440 and
+      .refreshRate >= 119 and .refreshRate <= 121) | .id' \
+    <<<"$display_json" | head -n 1)"
+  [[ -n "$target_mode_id" && "$target_mode_id" != "null" ]] || {
+    printf 'Warning: no 3440x1440 120 Hz mode found for %s.\n' \
+      "$display_connector" >&2
+    return 0
+  }
+  [[ "$display_original_mode_id" != "$target_mode_id" ]] || return 0
+
+  if kscreen-doctor \
+    "output.${output_id}.mode.${target_mode_id}" >/dev/null 2>&1; then
+    display_refresh_changed=1
+    printf 'Set %s to 120 Hz for direct VR.\n' "$display_connector"
+    # KWin returns before the DisplayPort link has completely retrained.  A
+    # compositor started in that window can see the Beyond but receive no
+    # Vulkan surface formats and then terminate.
+    sleep 3
+  else
+    printf 'Warning: could not set %s to 120 Hz.\n' \
+      "$display_connector" >&2
+  fi
+}
+
+restore_vr_desktop_refresh() {
+  (( display_refresh_changed == 1 )) || return 0
+  command -v kscreen-doctor >/dev/null || return 0
+  command -v jq >/dev/null || return 0
+
+  local display_json output_id
+  display_json="$(kscreen-doctor -j 2>/dev/null)" || return 0
+  output_id="$(jq -r --arg connector "$display_connector" \
+    '.outputs[] | select(.name == $connector and .connected == true and
+      .enabled == true) | .id' <<<"$display_json" | head -n 1)"
+  [[ "$output_id" =~ ^[0-9]+$ ]] || return 0
+  [[ -n "$display_original_mode_id" &&
+    "$display_original_mode_id" != "null" ]] || return 0
+
+  if kscreen-doctor \
+    "output.${output_id}.mode.${display_original_mode_id}" \
+    >/dev/null 2>&1; then
+    printf 'Restored %s to its previous refresh rate.\n' \
+      "$display_connector"
+  else
+    printf 'Warning: could not restore the prior mode for %s.\n' \
+      "$display_connector" >&2
+  fi
+}
+
+cleanup_eye_tracking() {
+  if (( eye_tracking_started == 1 )) && [[ -x "$DCS_EYE_TRACKING" ]]; then
+    "$DCS_EYE_TRACKING" stop || true
+  fi
+}
+
+cleanup_monado() {
+  if [[ "$monado_input_fd" =~ ^[0-9]+$ ]]; then
+    exec {monado_input_fd}>&- 2>/dev/null || true
+  fi
+
+  if (( monado_started == 1 )) && [[ "$monado_pid" =~ ^[0-9]+$ ]] \
+    && kill -0 "$monado_pid" 2>/dev/null; then
+    kill -TERM "$monado_pid" 2>/dev/null || true
+    for _ in {1..30}; do
+      kill -0 "$monado_pid" 2>/dev/null || break
+      sleep 0.1
+    done
+    kill -0 "$monado_pid" 2>/dev/null && kill -KILL "$monado_pid" 2>/dev/null || true
+  fi
+
+  if (( openxr_runtime_switched == 1 )); then
+    if [[ -n "$openxr_original_target" ]]; then
+      ln -sfn "$openxr_original_target" "$OPENXR_ACTIVE_RUNTIME"
+    else
+      rm -f "$OPENXR_ACTIVE_RUNTIME"
+    fi
+  fi
+}
+
+process_is_running() {
+  local pid="$1" state
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  state="$(ps -o stat= -p "$pid" 2>/dev/null || true)"
+  [[ -n "$state" && "$state" != Z* ]]
+}
+
+terminate_dcs() {
+  process_is_running "$dcs_pid" || return 0
+
+  kill -TERM "$dcs_pid" 2>/dev/null || true
+  for _ in {1..30}; do
+    process_is_running "$dcs_pid" || break
+    sleep 0.1
+  done
+
+  # umu-run can exit before all Wine children have released the DCS prefix.
+  # This prefix is dedicated to DCS, so stop its wineserver during abnormal
+  # shutdown rather than leaving an orphan able to retain the GPU or OpenXR.
+  if [[ -x "$DCS_PROTON/files/bin/wineserver" ]]; then
+    WINEPREFIX="$DCS_PREFIX" \
+      "$DCS_PROTON/files/bin/wineserver" -k >/dev/null 2>&1 || true
+  fi
+
+  for _ in {1..70}; do
+    process_is_running "$dcs_pid" || return 0
+    sleep 0.1
+  done
+  kill -KILL "$dcs_pid" 2>/dev/null || true
+}
+
+cleanup_launcher_bridge() {
+  if [[ "$launcher_bridge_pid" =~ ^[0-9]+$ ]] \
+    && kill -0 "$launcher_bridge_pid" 2>/dev/null; then
+    # The watcher is a Bash pipeline; stop both its tail process and reader.
+    pkill -TERM -P "$launcher_bridge_pid" 2>/dev/null || true
+    kill -TERM "$launcher_bridge_pid" 2>/dev/null || true
+    wait "$launcher_bridge_pid" 2>/dev/null || true
+  fi
+  launcher_bridge_pid=""
+
+  if [[ -n "$launcher_bridge_dir" \
+    && "$launcher_bridge_dir" == "${XDG_RUNTIME_DIR:-/run/user/$UID}"/dcs-launcher-bridge.* ]]; then
+    rm -f -- "$launcher_bridge_dir/request" \
+      "$launcher_bridge_dir/request.tmp" 2>/dev/null || true
+    rmdir -- "$launcher_bridge_dir" 2>/dev/null || true
+  fi
+  launcher_bridge_dir=""
+  launcher_bridge_request=""
+}
+
+cleanup() {
+  terminate_dcs
+  cleanup_launcher_bridge
+  cleanup_eye_tracking
+  if (( wayvr_started == 1 )); then
+    systemctl --user stop dcs-wayvr.service || true
+  fi
+  cleanup_monado
+  restore_vr_desktop_refresh
+}
+
+ensure_wayvr() {
+  [[ "${DCS_WAYVR:-1}" == "1" ]] || return 0
+  systemctl --user is-active --quiet dcs-wayvr.service && return 0
+  systemctl --user import-environment DISPLAY WAYLAND_DISPLAY XAUTHORITY \
+    XDG_CURRENT_DESKTOP XDG_SESSION_TYPE >/dev/null 2>&1 || true
+  if "$HOME/.local/bin/dcs-wayvr" start; then
+    wayvr_started=1
+    printf 'WayVR started. Select a screen if KDE requests screen-sharing access.\n'
+  else
+    printf 'Warning: WayVR could not start; see %s/Games/dcs-linux/wayvr.log.\n' "$HOME" >&2
+  fi
+}
+
+watch_launcher_updater_request() {
+  local request_file="$1" line command verb token
+  local -a updater_args=()
+
+  # DCS's Chromium launcher can enumerate modules under Proton, but its
+  # internal child-process helper returns Win32 error 2 when it tries to start
+  # bin/DCS_updater.exe. Watch only new log records from this launcher session
+  # and pass a narrowly validated module operation back to the parent.
+  tail -n 0 -F "$DCS_LOG" 2>/dev/null |
+    while IFS= read -r line; do
+      [[ "$line" == *"Launching process 'bin/DCS_updater.exe' failed with error code 2, command line: "* ]] || continue
+      command="${line#*command line: }"
+      command="${command%%, current directory:*}"
+      read -r -a updater_args <<<"$command"
+      (( ${#updater_args[@]} >= 2 )) || continue
+
+      verb="${updater_args[0]}"
+      [[ "$verb" == "install" || "$verb" == "uninstall" ]] || continue
+      for token in "${updater_args[@]:1}"; do
+        if [[ ! "$token" =~ ^[A-Za-z0-9_.+-]+$ ]]; then
+          printf 'Rejected unsafe launcher module token: %q\n' "$token" \
+            >>"$DCS_LAUNCHER_BRIDGE_LOG"
+          updater_args=()
+          break
+        fi
+      done
+      (( ${#updater_args[@]} >= 2 )) || continue
+
+      printf '%s\0' "${updater_args[@]}" >"$request_file.tmp"
+      mv -f -- "$request_file.tmp" "$request_file"
+      printf 'Captured DCS launcher request: %s\n' "$command" \
+        >>"$DCS_LAUNCHER_BRIDGE_LOG"
+      break
+    done
+}
+
+run_dcs_launcher_with_bridge() {
+  local dcs_status=0 updater_status=0
+  local runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$UID}"
+  local -a updater_args=()
+
+  mkdir -p "$runtime_dir" "$(dirname "$DCS_LOG")" \
+    "$(dirname "$DCS_LAUNCHER_BRIDGE_LOG")"
+  touch "$DCS_LOG"
+  launcher_bridge_dir="$(mktemp -d \
+    "$runtime_dir/dcs-launcher-bridge.XXXXXX")"
+  launcher_bridge_request="$launcher_bridge_dir/request"
+  : >"$DCS_LAUNCHER_BRIDGE_LOG"
+
+  watch_launcher_updater_request "$launcher_bridge_request" &
+  launcher_bridge_pid="$!"
+
+  "$DCS_UMU" "$DCS_EXE" "$@" &
+  dcs_pid="$!"
+  while process_is_running "$dcs_pid"; do
+    if [[ -s "$launcher_bridge_request" ]]; then
+      mapfile -d '' -t updater_args <"$launcher_bridge_request"
+      printf '%s\n' \
+        'DCS could not start its updater through Wine; handing the validated module request to Proton.'
+      command -v notify-send >/dev/null && notify-send \
+        'DCS Module Manager' \
+        'Launcher request captured; starting the DCS updater.' || true
+      terminate_dcs
+      break
+    fi
+    sleep 0.25
+  done
+
+  wait "$dcs_pid" 2>/dev/null || dcs_status="$?"
+  dcs_pid=""
+  cleanup_launcher_bridge
+
+  if (( ${#updater_args[@]} == 0 )); then
+    return "$dcs_status"
+  fi
+
+  printf 'Starting DCS updater: %s (%d module%s)\n' \
+    "${updater_args[0]}" "$(( ${#updater_args[@]} - 1 ))" \
+    "$([[ ${#updater_args[@]} -eq 2 ]] && printf '' || printf 's')"
+  cd "$DCS_ROOT"
+  "$DCS_UMU" "$DCS_UPDATER" "${updater_args[@]}" || updater_status="$?"
+  if (( updater_status != 0 )) && command -v notify-send >/dev/null; then
+    notify-send -u critical 'DCS Module Manager' \
+      "DCS updater exited with status $updater_status."
+  fi
+  return "$updater_status"
+}
+
+trap cleanup EXIT
+
+usage() {
+  printf '%s\n' \
+    "Usage: dcs-linux [launcher|modules|desktop|vr|monado|log] [arguments...]" \
+    "" \
+    "  launcher Open the DCS launcher for modules, updates, and repair" \
+    "  modules  Install one or more updater module IDs directly" \
+    "  desktop  Launch DCS on the monitor (default)" \
+    "  vr       Start SteamVR if necessary, then launch DCS OpenXR" \
+    "  monado   Launch DCS OpenXR directly through Monado" \
+    "  log      Follow the current DCS log"
+}
+
+dismiss_dcs_authorization_notice() {
+  command -v xdotool >/dev/null || return 0
+
+  # Wine renders DCS's "unlicensed module disabled" notice transparently.
+  # Dismiss only that exact DCS window so startup can continue.
+  for _ in {1..180}; do
+    local class window
+    while read -r window; do
+      class="$(xprop -id "$window" WM_CLASS 2>/dev/null || true)"
+      if [[ "$class" == *steam_app_223750* ]]; then
+        xdotool windowactivate --sync "$window" >/dev/null 2>&1 || true
+        xdotool key --window "$window" Return >/dev/null 2>&1 || true
+        break
+      fi
+    done < <(xdotool search --onlyvisible --name '^Authorization failed$' \
+      2>/dev/null || true)
+    sleep 1
+  done
+}
+
+steamvr_compositor_running() {
+  local pid state
+  while read -r pid; do
+    state="$(ps -o stat= -p "$pid" 2>/dev/null || true)"
+    [[ -n "$state" && "$state" != Z* ]] && return 0
+  done < <(pgrep -x vrcompositor || true)
+  return 1
+}
+
+stop_failed_steamvr() {
+  local name
+  local -a pids=()
+
+  for name in vrmonitor vrcompositor vrdashboard vrserver; do
+    mapfile -t pids < <(pgrep -x "$name" || true)
+    (( ${#pids[@]} == 0 )) || kill -INT "${pids[@]}" 2>/dev/null || true
+  done
+  sleep 3
+
+  for name in vrmonitor vrcompositor vrdashboard vrserver; do
+    mapfile -t pids < <(pgrep -x "$name" || true)
+    (( ${#pids[@]} == 0 )) || kill -TERM "${pids[@]}" 2>/dev/null || true
+  done
+}
+
+ensure_ab9_ffb() {
+  [[ -x "$AB9_SETUP" ]] || return 0
+
+  local attempt
+  for attempt in 1 2 3; do
+    if "$AB9_SETUP" --ensure-directinput >"$AB9_LOG" 2>&1; then
+      return 0
+    fi
+    (( attempt == 3 )) || sleep 1
+  done
+
+  printf 'Warning: AB9 native FFB readiness check failed; see %s.\n' \
+    "$AB9_LOG" >&2
+}
+
+flight_usb_controller_has_children() {
+  local controller_path root bus child
+  controller_path="$(readlink -f /sys/bus/pci/devices/0000:0c:00.0 2>/dev/null)"
+  [[ -n "$controller_path" ]] || return 1
+
+  for root in /sys/bus/usb/devices/usb*; do
+    [[ "$(readlink -f "$root" 2>/dev/null)" == "$controller_path"/usb* ]] \
+      || continue
+    bus="${root##*usb}"
+    for child in /sys/bus/usb/devices/"$bus"-*; do
+      [[ -r "$child/idVendor" ]] && return 0
+    done
+  done
+  return 1
+}
+
+ensure_flight_usb_controller() {
+  local pci_id='0000:0c:00.0' attempt
+  local driver='/sys/bus/pci/drivers/xhci_hcd'
+
+  [[ -d "/sys/bus/pci/devices/$pci_id" ]] || return 0
+  flight_usb_controller_has_children && return 0
+
+  printf 'The flight-control xHCI controller has no devices; recovering it before DCS starts.\n' >&2
+  if ! sudo -n true >/dev/null 2>&1; then
+    printf 'Cannot recover the USB controller without non-interactive sudo.\n' >&2
+    return 1
+  fi
+
+  if [[ -L "/sys/bus/pci/devices/$pci_id/driver" ]]; then
+    printf '%s' "$pci_id" | sudo tee "$driver/unbind" >/dev/null
+    sleep 1
+  fi
+  printf '%s' "$pci_id" | sudo tee "$driver/bind" >/dev/null
+
+  for attempt in {1..30}; do
+    flight_usb_controller_has_children && {
+      printf 'Flight-control USB controller recovered before launch.\n'
+      return 0
+    }
+    sleep 0.5
+  done
+
+  printf 'Flight-control USB controller did not recover; refusing to start DCS without controls.\n' >&2
+  return 1
+}
+
+ensure_steamvr() {
+  steamvr_compositor_running && return 0
+
+  local attempt
+  for attempt in 1 2; do
+    pgrep -x vrserver >/dev/null && stop_failed_steamvr
+    steam steam://rungameid/250820 \
+      >"$HOME/Games/dcs-linux/steamvr-launch.log" 2>&1 &
+
+    for _ in {1..45}; do
+      if steamvr_compositor_running; then
+        sleep 3
+        steamvr_compositor_running && return 0
+      fi
+      sleep 1
+    done
+  done
+
+  printf 'SteamVR compositor did not start after one automatic retry.\n' >&2
+  return 1
+}
+
+monado_service_running() {
+  local pid state
+  while read -r pid; do
+    state="$(ps -o stat= -p "$pid" 2>/dev/null || true)"
+    [[ -n "$state" && "$state" != Z* ]] && return 0
+  done < <(pgrep -x monado-service || true)
+  return 1
+}
+
+running_monado_pid() {
+  local pid
+  while read -r pid; do
+    if process_is_running "$pid"; then
+      printf '%s\n' "$pid"
+      return 0
+    fi
+  done < <(pgrep -x monado-service || true)
+  return 1
+}
+
+ensure_monado() {
+  [[ -r "$MONADO_RUNTIME" ]] || {
+    printf 'Monado OpenXR runtime is missing: %s\n' "$MONADO_RUNTIME" >&2
+    return 1
+  }
+
+  if monado_pid="$(running_monado_pid)" && [[ -S "$MONADO_SOCKET" ]]; then
+    return 0
+  fi
+  monado_pid=""
+
+  systemctl --user stop monado.service monado.socket >/dev/null 2>&1 || true
+  mkdir -p "$(dirname "$MONADO_LOG")"
+  coproc DCS_MONADO_SERVICE {
+    exec env \
+      STEAMVR_LH_ENABLE=true \
+      LH_DRIVER=steamvr \
+      XRT_COMPOSITOR_SCALE_PERCENTAGE=100 \
+      XRT_COMPOSITOR_COMPUTE=1 \
+      U_PACING_APP_USE_MIN_FRAME_PERIOD=1 \
+      XRT_DEBUG_GUI=0 \
+      XRT_CURATED_GUI=0 \
+      monado-service >"$MONADO_LOG" 2>&1
+  }
+  monado_pid="$DCS_MONADO_SERVICE_PID"
+  monado_input_fd="${DCS_MONADO_SERVICE[1]}"
+  monado_started=1
+
+  for _ in {1..100}; do
+    if kill -0 "$monado_pid" 2>/dev/null && [[ -S "$MONADO_SOCKET" ]]; then
+      # The IPC socket appears before direct-display Vulkan initialization is
+      # finished.  Do not hand DCS a runtime that is about to terminate.
+      sleep 3
+      if kill -0 "$monado_pid" 2>/dev/null && [[ -S "$MONADO_SOCKET" ]]; then
+        return 0
+      fi
+      break
+    fi
+    sleep 0.1
+  done
+
+  printf 'Monado did not become ready; see %s.\n' "$MONADO_LOG" >&2
+  return 1
+}
+
+run_dcs_with_monado_supervision() {
+  local dcs_status=0 monado_failed=0
+
+  "$DCS_UMU" "$DCS_EXE" "${args[@]}" "$@" &
+  dcs_pid="$!"
+
+  while process_is_running "$dcs_pid"; do
+    if ! process_is_running "$monado_pid"; then
+      monado_failed=1
+      printf '%s\n' \
+        'Monado exited while DCS was running; stopping DCS and restoring the desktop.' \
+        "See $MONADO_LOG for the runtime failure." >&2
+      terminate_dcs
+      break
+    fi
+    sleep 0.5
+  done
+
+  wait "$dcs_pid" || dcs_status="$?"
+  dcs_pid=""
+
+  if (( monado_failed == 1 )); then
+    return 70
+  fi
+  return "$dcs_status"
+}
+
+select_monado_runtime() {
+  mkdir -p "$(dirname "$OPENXR_ACTIVE_RUNTIME")"
+  if [[ -L "$OPENXR_ACTIVE_RUNTIME" ]]; then
+    openxr_original_target="$(readlink -f "$OPENXR_ACTIVE_RUNTIME")"
+    # A machine reset can bypass this launcher's EXIT trap and leave Monado
+    # globally selected. Treat that stale state as SteamVR for restoration.
+    if [[ "$openxr_original_target" == "$MONADO_RUNTIME" ]] \
+      && [[ -r "$STEAMVR_RUNTIME" ]]; then
+      openxr_original_target="$STEAMVR_RUNTIME"
+    fi
+  elif [[ -e "$OPENXR_ACTIVE_RUNTIME" ]]; then
+    printf '%s must be a symlink before the temporary Monado switch.\n' \
+      "$OPENXR_ACTIVE_RUNTIME" >&2
+    return 1
+  elif [[ -r "$STEAMVR_RUNTIME" ]]; then
+    openxr_original_target="$STEAMVR_RUNTIME"
+  fi
+
+  ln -sfn "$MONADO_RUNTIME" "$OPENXR_ACTIVE_RUNTIME"
+  openxr_runtime_switched=1
+}
+
+mode="${1:-desktop}"
+if (( $# > 0 )); then
+  shift
+fi
+
+case "$mode" in
+  -h|--help)
+    usage
+    exit 0
+    ;;
+  log)
+    if [[ ! -f "$DCS_LOG" ]]; then
+      printf 'No DCS log exists yet: %s\n' "$DCS_LOG" >&2
+      exit 1
+    fi
+    exec tail -n 200 -F "$DCS_LOG"
+    ;;
+  launcher|modules|desktop|vr|monado) ;;
+  *)
+    printf 'Unknown mode: %s\n\n' "$mode" >&2
+    usage >&2
+    exit 2
+    ;;
+esac
+
+if ! mountpoint -q "$DCS_MOUNT"; then
+  if ! mount "$DCS_MOUNT"; then
+    printf 'Could not mount the DCS drive at %s.\n' "$DCS_MOUNT" >&2
+    exit 1
+  fi
+fi
+
+if [[ ! -r "$DCS_EXE" ]]; then
+  printf 'DCS executable not found or unreadable: %s\n' "$DCS_EXE" >&2
+  exit 1
+fi
+
+if [[ ( "$mode" == "launcher" || "$mode" == "modules" ) \
+  && ! -x "$DCS_UPDATER" ]]; then
+  printf 'DCS updater not found or not executable: %s\n' "$DCS_UPDATER" >&2
+  exit 1
+fi
+
+if [[ "$mode" != "launcher" && "$mode" != "modules" ]]; then
+  ensure_flight_usb_controller
+  ensure_ab9_ffb
+fi
+
+export GAMEID="umu-223750"
+export STORE="none"
+export WINEPREFIX="$DCS_PREFIX"
+export PROTONPATH="$DCS_PROTON"
+export PROTON_USE_XALIA="0"
+export WINE_SIMULATE_WRITECOPY="1"
+export WINEDLLOVERRIDES="wbemprox=n"
+# Windows-visible DCS root used by the custom DXVK AH-64D alpha repair.
+export DCS_MFD_ROOT='W:\dcs\Program Files\Eagle Dynamics\DCS World'
+export MESA_SHADER_CACHE_DIR="$HOME/Games/dcs-linux/cache/mesa"
+export MESA_SHADER_CACHE_MAX_SIZE="10G"
+export DXVK_STATE_CACHE_PATH="$HOME/Games/dcs-linux/cache/dxvk"
+
+# DXVK enables Vulkan descriptor buffers by default on recent AMD GPUs.
+# The DCS Apache's dynamic MPD/TEDAC textures have rendered as solid blocks on
+# this RDNA4 system, so use the older descriptor path for DCS only.  Set
+# DCS_ENABLE_DXVK_DESCRIPTOR_BUFFER=1 to bypass this compatibility workaround.
+if [[ "$mode" != "launcher" && "$mode" != "modules" \
+  && "${DCS_ENABLE_DXVK_DESCRIPTOR_BUFFER:-0}" != "1" ]]; then
+  if [[ -n "${DXVK_CONFIG:-}" ]]; then
+    export DXVK_CONFIG="${DXVK_CONFIG}; dxvk.enableDescriptorBuffer = False"
+  else
+    export DXVK_CONFIG="dxvk.enableDescriptorBuffer = False"
+  fi
+fi
+
+if [[ "$mode" == "modules" ]]; then
+  if (( $# == 0 )); then
+    printf 'Provide at least one DCS updater module ID.\n' >&2
+    exit 2
+  fi
+  cd "$DCS_ROOT"
+  "$DCS_UMU" "$DCS_UPDATER" install "$@"
+  exit "$?"
+fi
+
+# Keep Virpil and MFG on Proton's raw-HID backend.  Deliberately leave the AB9
+# out so Wine enumerates it through evdev; that is the backend which exposes
+# Linux FF_* effects to DirectInput.  HIDRAW input worked for the AB9 but DCS
+# never opened /dev/input/event* and therefore produced no native flight force.
+# Set DCS_DISABLE_HIDRAW=1 only as a troubleshooting fallback for all devices.
+if [[ "${DCS_DISABLE_HIDRAW:-0}" != "1" ]]; then
+  export PROTON_ENABLE_HIDRAW="0x3344/0x8194,0x3344/0x832E,0x16D0/0x0A38"
+fi
+
+args=()
+if [[ "$mode" != "launcher" ]]; then
+  args+=(--no-launcher)
+fi
+if [[ "$mode" == "vr" || "$mode" == "monado" ]]; then
+  export PRESSURE_VESSEL_IMPORT_OPENXR_1_RUNTIMES="1"
+  args+=(--force_enable_VR --force_OpenXR)
+
+  if [[ "$mode" == "vr" ]]; then
+    ensure_steamvr
+  else
+    set_vr_desktop_refresh
+    ensure_monado
+    select_monado_runtime
+    ensure_wayvr
+  fi
+
+  if [[ -x "$DCS_EYE_TRACKING" ]] && ! "$DCS_EYE_TRACKING" status >/dev/null 2>&1; then
+    "$DCS_EYE_TRACKING" start
+    eye_tracking_started=1
+  fi
+fi
+
+cd "$DCS_ROOT/bin"
+if [[ "${DCS_DISMISS_AUTHORIZATION_NOTICE:-0}" == "1" ]]; then
+  dismiss_dcs_authorization_notice &
+fi
+# Wine regenerates DirectInput instance GUIDs across some launches. DCS embeds
+# those GUIDs in input-profile filenames, so migrate the stable Apache
+# templates after this launch's device enumeration and capture any in-game
+# edits back to the templates when DCS exits.
+if [[ -x "$DCS_INPUT_SYNC" ]]; then
+  "$DCS_INPUT_SYNC" watch >"$DCS_INPUT_SYNC_LOG" 2>&1 &
+fi
+dcs_status=0
+if [[ "$mode" == "launcher" ]]; then
+  run_dcs_launcher_with_bridge "$@" || dcs_status="$?"
+elif [[ "$mode" == "monado" ]]; then
+  run_dcs_with_monado_supervision "$@" || dcs_status="$?"
+else
+  "$DCS_UMU" "$DCS_EXE" "${args[@]}" "$@" || dcs_status="$?"
+fi
+exit "$dcs_status"

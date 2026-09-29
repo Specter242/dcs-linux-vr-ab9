@@ -1,0 +1,369 @@
+diff --git a/src/Baballonia.Desktop/Baballonia.Desktop.csproj b/src/Baballonia.Desktop/Baballonia.Desktop.csproj
+index 3f351ec..20a4811 100644
+--- a/src/Baballonia.Desktop/Baballonia.Desktop.csproj
++++ b/src/Baballonia.Desktop/Baballonia.Desktop.csproj
+@@ -157,13 +157,13 @@
+     <!-- TODO: this sucks -->
+     <Target Name="CopyModulesToFolderPublish" AfterTargets="Publish">
+         <ItemGroup>
+-            <PublishModuleDlls Condition="Exists('$(OutputPath)\publish\Baballonia.SerialCameraCapture.dll')" Include="$(OutputPath)\publish\Baballonia.SerialCameraCapture.dll" />
+-            <PublishModuleDlls Condition="Exists('$(OutputPath)\publish\Baballonia.OpenCVCapture.dll')" Include="$(OutputPath)\publish\Baballonia.OpenCVCapture.dll" />
+-            <PublishModuleDlls Condition="Exists('$(OutputPath)\publish\Baballonia.IPCameraCapture.dll')" Include="$(OutputPath)\publish\Baballonia.IPCameraCapture.dll" />
+-            <PublishModuleDlls Condition="Exists('$(OutputPath)\publish\Baballonia.VFTCapture.dll')" Include="$(OutputPath)\publish\Baballonia.VFTCapture.dll" />
+-            <PublishModuleDlls Condition="Exists('$(OutputPath)\publish\Baballonia.LibV4L2Capture.dll')" Include="$(OutputPath)\publish\Baballonia.LibV4L2Capture.dll" />
++            <PublishModuleDlls Condition="Exists('$(PublishDir)Baballonia.SerialCameraCapture.dll')" Include="$(PublishDir)Baballonia.SerialCameraCapture.dll" />
++            <PublishModuleDlls Condition="Exists('$(PublishDir)Baballonia.OpenCVCapture.dll')" Include="$(PublishDir)Baballonia.OpenCVCapture.dll" />
++            <PublishModuleDlls Condition="Exists('$(PublishDir)Baballonia.IPCameraCapture.dll')" Include="$(PublishDir)Baballonia.IPCameraCapture.dll" />
++            <PublishModuleDlls Condition="Exists('$(PublishDir)Baballonia.VFTCapture.dll')" Include="$(PublishDir)Baballonia.VFTCapture.dll" />
++            <PublishModuleDlls Condition="Exists('$(PublishDir)Baballonia.LibV4L2Capture.dll')" Include="$(PublishDir)Baballonia.LibV4L2Capture.dll" />
+         </ItemGroup>
+-        <Move SourceFiles="@(PublishModuleDlls)" DestinationFolder="$(OutputPath)\publish\Modules\" />
++        <Move SourceFiles="@(PublishModuleDlls)" DestinationFolder="$(PublishDir)Modules\" />
+     </Target>
+ 
+     <!-- SkiaSharp is currently broken on ARM for some reason -->
+diff --git a/src/Baballonia/Services/DefaultInferenceRunner.cs b/src/Baballonia/Services/DefaultInferenceRunner.cs
+index cee16f7..4d8019a 100644
+--- a/src/Baballonia/Services/DefaultInferenceRunner.cs
++++ b/src/Baballonia/Services/DefaultInferenceRunner.cs
+@@ -21,6 +21,7 @@ public class DefaultInferenceRunner(ILoggerFactory loggerFactory) : IInferenceRu
+     private InferenceSession _session;
+     private string[] _outputExpressionNames;
+     private bool _isOldEyeModel;
++    private int[]? _eyeOutputIndices;
+ 
+ 
+     /// <summary>
+@@ -56,12 +57,21 @@ public class DefaultInferenceRunner(ILoggerFactory loggerFactory) : IInferenceRu
+     /// </summary>
+     private void InitializeModelMetadata()
+     {
++        _eyeOutputIndices = null;
+         _isOldEyeModel = _session.ModelMetadata.CustomMetadataMap.Count() == 0;
+ 
+         if (!_isOldEyeModel)
+         {
+             var metadataJson = _session.ModelMetadata.CustomMetadataMap["blendshape_names"];
+             _outputExpressionNames = JsonConvert.DeserializeObject<string[]>(metadataJson)!;
++            // Personalized temporal models may also export brow/squint shapes.
++            // Normalize their named outputs to the six values expected by the
++            // eye filter and expression converter before either consumes them.
++            string[] eyeNames = ["rightEyeY", "rightEyeX", "rightEyeLid",
++                                 "leftEyeY", "leftEyeX", "leftEyeLid"];
++            var indices = eyeNames.Select(name => Array.IndexOf(_outputExpressionNames, name)).ToArray();
++            if (indices.All(index => index >= 0))
++                _eyeOutputIndices = indices;
+         }
+     }
+ 
+@@ -189,6 +199,8 @@ public class DefaultInferenceRunner(ILoggerFactory loggerFactory) : IInferenceRu
+         using var results = _session.Run(inputs);
+ 
+         var output = results[0].AsEnumerable<float>().ToArray();
++        if (_eyeOutputIndices != null)
++            output = _eyeOutputIndices.Select(index => output[index]).ToArray();
+         OutputSize = output.Length;
+         return output;
+     }
+diff --git a/src/Baballonia/Services/Inference/EyeProcessingPipeline.cs b/src/Baballonia/Services/Inference/EyeProcessingPipeline.cs
+index 87706f4..cbd8551 100644
+--- a/src/Baballonia/Services/Inference/EyeProcessingPipeline.cs
++++ b/src/Baballonia/Services/Inference/EyeProcessingPipeline.cs
+@@ -1,46 +1,102 @@
+ ﻿using Baballonia.Services.events;
+ using Baballonia.Services.Inference.Enums;
++using Microsoft.Extensions.Logging;
+ using System;
+ 
+ namespace Baballonia.Services.Inference;
+ 
+-public class EyeProcessingPipeline(IEyePipelineEventBus eyePipelineEventBus) : DefaultProcessingPipeline, IDisposable
++public class EyeProcessingPipeline(
++    IEyePipelineEventBus eyePipelineEventBus,
++    ILogger<EyeProcessingPipeline> logger) : DefaultProcessingPipeline, IDisposable
+ {
+     private readonly FastCorruptionDetector.FastCorruptionDetector _fastCorruptionDetector = new();
+     private readonly ImageCollector _imageCollector = new();
+ 
+     public bool StabilizeEyes { get; set; } = true;
+ 
++    private long _updates;
++    private long _frames;
++    private long _corrupted;
++    private long _transformed;
++    private long _collected;
++    private long _outputs;
++    private string _lastStop = "startup";
++    private DateTime _nextDiagnostic = DateTime.UtcNow.AddSeconds(5);
++
++    private float[]? StopAt(string stage)
++    {
++        _lastStop = stage;
++        LogDiagnosticIfDue();
++        return null;
++    }
++
++    private void LogDiagnosticIfDue()
++    {
++        if (DateTime.UtcNow < _nextDiagnostic)
++            return;
++
++        logger.LogInformation(
++            "Eye pipeline diagnostic: updates={Updates}, frames={Frames}, corrupted={Corrupted}, transformed={Transformed}, collected={Collected}, outputs={Outputs}, lastStop={LastStop}",
++            _updates, _frames, _corrupted, _transformed, _collected, _outputs, _lastStop);
++        _nextDiagnostic = DateTime.UtcNow.AddSeconds(5);
++    }
++
+     public float[]? RunUpdate()
+     {
++        _updates++;
+         var frame = VideoSource?.GetFrame(ColorType.Gray8);
+         if(frame == null)
+-            return null;
++            return StopAt("no-frame");
++
++        _frames++;
+ 
+-        if (_fastCorruptionDetector.IsCorrupted(frame).isCorrupted)
+-            return null;
++        var corruption = _fastCorruptionDetector.IsCorrupted(frame);
++        if (corruption.isCorrupted)
++        {
++            _corrupted++;
++            frame.Dispose();
++            return StopAt($"corrupted(metric={corruption.metricValue:F6},threshold={corruption.thresholdUsed:F6})");
++        }
+ 
+         eyePipelineEventBus.Publish(new EyePipelineEvents.NewFrameEvent(frame));
+ 
+         var transformed = ImageTransformer?.Apply(frame);
+         if(transformed == null)
+-            return null;
++        {
++            frame.Dispose();
++            return StopAt("no-transform");
++        }
++
++        _transformed++;
+ 
+         eyePipelineEventBus.Publish(new EyePipelineEvents.NewTransformedFrameEvent(transformed));
+ 
+         var collected = _imageCollector.Apply(transformed);
+         transformed.Dispose();
+         if (collected == null)
+-            return null;
++        {
++            frame.Dispose();
++            return StopAt("collector-warmup");
++        }
++
++        _collected++;
+ 
+         if (InferenceService == null)
+-            return null;
++        {
++            frame.Dispose();
++            collected.Dispose();
++            return StopAt("no-inference-service");
++        }
+ 
+         ImageConverter?.Convert(collected, InferenceService.GetInputTensor());
+ 
+         var inferenceResult = InferenceService?.Run();
+         if(inferenceResult == null)
+-            return null;
++        {
++            frame.Dispose();
++            collected.Dispose();
++            return StopAt("null-inference-result");
++        }
+ 
+         if (Filter != null)
+         {
+@@ -52,7 +108,11 @@ public class EyeProcessingPipeline(IEyePipelineEventBus eyePipelineEventBus) : D
+         eyePipelineEventBus.Publish(new EyePipelineEvents.NewFilteredResultEvent(inferenceResult));
+ 
+         frame.Dispose();
+-        transformed.Dispose();
++        collected.Dispose();
++
++        _outputs++;
++        _lastStop = "output";
++        LogDiagnosticIfDue();
+ 
+         return inferenceResult;
+     }
+@@ -73,7 +133,10 @@ public class EyeProcessingPipeline(IEyePipelineEventBus eyePipelineEventBus) : D
+         var rightYaw = arKitExpressions[4] * mulV - mulV / 2;
+         var rightLid = 1 - arKitExpressions[5];
+ 
+-        var eyeY = (leftPitch * leftLid + rightPitch * rightLid) / (leftLid + rightLid);
++        var lidWeight = leftLid + rightLid;
++        var eyeY = lidWeight > 0.0001f
++            ? (leftPitch * leftLid + rightPitch * rightLid) / lidWeight
++            : (leftPitch + rightPitch) / 2f;
+ 
+         var leftEyeYawCorrected = rightYaw * (1 - leftLid) + leftYaw * leftLid;
+         var rightEyeYawCorrected = leftYaw * (1 - rightLid) + rightYaw * rightLid;
+diff --git a/src/Baballonia/Services/OscSendService.cs b/src/Baballonia/Services/OscSendService.cs
+index 5486e65..cdb8c8a 100644
+--- a/src/Baballonia/Services/OscSendService.cs
++++ b/src/Baballonia/Services/OscSendService.cs
+@@ -19,6 +19,7 @@ public abstract class OscSendService(
+     public event Action<int> OnMessagesDispatched = _ => { };
+     protected readonly IOscTarget OscTarget = oscTarget;
+     private Socket _sendSocket;
++    private IPEndPoint _sendEndpoint;
+ 
+     protected void UpdateTarget(IPEndPoint endpoint)
+     {
+@@ -29,7 +30,10 @@ public abstract class OscSendService(
+ 
+         try
+         {
+-            _sendSocket.Connect(endpoint);
++            // Unconnected UDP keeps working when an OSC consumer starts later
++            // or restarts. Connected Linux sockets can retain ICMP errors.
++            _sendSocket.Bind(new IPEndPoint(IPAddress.Loopback, 0));
++            _sendEndpoint = endpoint;
+             OscTarget.IsConnected = true;
+         }
+         catch (SocketException ex)
+@@ -42,44 +46,47 @@ public abstract class OscSendService(
+         }
+     }
+ 
+-    public async Task Send(OscMessage message, CancellationToken ct)
++    public async Task<bool> Send(OscMessage message, CancellationToken ct)
+     {
+-        if (_sendSocket is not { Connected: true })
++        if (_sendSocket == null || _sendEndpoint == null)
+         {
+-            return;
++            return false;
+         }
+ 
+         try
+         {
+-            var ip = IPEndPoint.Parse(OscTarget.DestinationAddress);
+-            await _sendSocket.SendToAsync(message.ToByteArray(), SocketFlags.None, ip, ct);
++            await _sendSocket.SendToAsync(message.ToByteArray(), SocketFlags.None, _sendEndpoint, ct);
+             OnMessagesDispatched(1);
++            return true;
+         }
+         catch (Exception ex)
+         {
+             logger.LogError(ex, "Error sending OSC message");
++            return false;
+         }
+     }
+ 
+-    public async Task Send(OscMessage[] messages, CancellationToken ct)
++    public async Task<bool> Send(OscMessage[] messages, CancellationToken ct)
+     {
+-        if (_sendSocket is not { Connected: true })
++        if (_sendSocket == null || _sendEndpoint == null)
+         {
+-            return;
++            return false;
+         }
+ 
+         try
+         {
+             foreach (var message in messages)
+             {
+-                await _sendSocket.SendAsync(message.ToByteArray(), SocketFlags.None, ct);
++                await _sendSocket.SendToAsync(message.ToByteArray(), SocketFlags.None, _sendEndpoint, ct);
+             }
+ 
+             OnMessagesDispatched(messages.Length);
++            return true;
+         }
+         catch (Exception ex)
+         {
+             logger.LogError(ex, "Error sending OSC bundle");
++            return false;
+         }
+     }
+ }
+diff --git a/src/Baballonia/Services/ParameterSenderService.cs b/src/Baballonia/Services/ParameterSenderService.cs
+index ff56038..d98f6fa 100644
+--- a/src/Baballonia/Services/ParameterSenderService.cs
++++ b/src/Baballonia/Services/ParameterSenderService.cs
+@@ -7,6 +7,8 @@ using System;
+ using System.Collections.Concurrent;
+ using System.Collections.Generic;
+ using System.Linq;
++using System.IO;
++using System.Text.Json;
+ using System.Threading;
+ using System.Threading.Tasks;
+ 
+@@ -25,6 +27,11 @@ public class ParameterSenderService : BackgroundService
+     private bool _useDfr;
+     private readonly ConcurrentQueue<OscMessage> _vrcftQueue = new();
+     private readonly ConcurrentQueue<OscMessage> _dfrQueue = new();
++    private long _eyeUpdates;
++    private DateTime _nextStatusWrite;
++    private readonly string? _gazeStatusFile = Environment.GetEnvironmentVariable("BABALLONIA_GAZE_STATUS_FILE");
++    private long _dfrMessagesSent;
++    private DateTime _nextDiagnostic = DateTime.UtcNow.AddSeconds(5);
+ 
+     // Expression parameter names
+     private readonly Dictionary<string, string> _eyeExpressionMap = new()
+@@ -125,9 +132,9 @@ public class ParameterSenderService : BackgroundService
+                 await SendAndClearQueue(cancellationToken);
+                 await Task.Delay(10, cancellationToken);
+             }
+-            catch (Exception)
++            catch (Exception ex)
+             {
+-                // ignore
++                _logger.LogError(ex, "Parameter sender loop failed");
+             }
+         }
+     }
+@@ -143,7 +150,9 @@ public class ParameterSenderService : BackgroundService
+     private void ProcessEyeExpressionData(float[] expressions)
+     {
+         if (expressions is null) return;
+-        if (expressions.Length == 0) return;
++        if (expressions.Length < 6 || expressions.Any(value => !float.IsFinite(value))) return;
++
++        _eyeUpdates++;
+ 
+         for (var i = 0; i < Math.Min(expressions.Length, _eyeExpressionMap.Count); i++)
+         {
+@@ -218,8 +227,31 @@ public class ParameterSenderService : BackgroundService
+ 
+         if (!_dfrQueue.IsEmpty)
+         {
+-            await _dfrSendService.Send(_dfrQueue.ToArray(), cancellationToken);
++            var messages = _dfrQueue.ToArray();
++            if (await _dfrSendService.Send(messages, cancellationToken))
++            {
++                _dfrMessagesSent += messages.Length;
++                if (_gazeStatusFile != null && DateTime.UtcNow >= _nextStatusWrite)
++                {
++                    var status = JsonSerializer.Serialize(new {
++                        timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0,
++                        eyeUpdates = _eyeUpdates,
++                        dfrMessagesSent = _dfrMessagesSent
++                    });
++                    File.WriteAllText(_gazeStatusFile + ".tmp", status);
++                    File.Move(_gazeStatusFile + ".tmp", _gazeStatusFile, true);
++                    _nextStatusWrite = DateTime.UtcNow.AddSeconds(1);
++                }
++            }
+             _dfrQueue.Clear();
+         }
++
++        if (DateTime.UtcNow >= _nextDiagnostic)
++        {
++            _logger.LogInformation(
++                "Eye OSC diagnostic: useDFR={UseDfr}, eyeUpdates={EyeUpdates}, dfrMessagesSent={DfrMessagesSent}",
++                _useDfr, _eyeUpdates, _dfrMessagesSent);
++            _nextDiagnostic = DateTime.UtcNow.AddSeconds(5);
++        }
+     }
+ }

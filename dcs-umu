@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+set -euo pipefail
+exec "$HOME/.local/share/dcs-linux/umu-1.4.4/umu/umu-run" "$@"

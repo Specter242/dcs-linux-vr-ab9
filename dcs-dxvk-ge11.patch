@@ -1,0 +1,225 @@
+diff --git a/src/d3d11/d3d11_device.cpp b/src/d3d11/d3d11_device.cpp
+index 97df7a0..326ba8c 100644
+--- a/src/d3d11/d3d11_device.cpp
++++ b/src/d3d11/d3d11_device.cpp
+@@ -1,5 +1,7 @@
+ #include <algorithm>
++#include <cstdlib>
+ #include <cstring>
++#include <fstream>
+ 
+ #include <dxbc/dxbc_container.h>
+ #include <dxbc/dxbc_parser.h>
+@@ -34,6 +36,119 @@
+ #include "../util/util_shared_res.h"
+ 
+ namespace dxvk {
++
++  namespace {
++
++    struct DcsMfdAtlas {
++      uint64_t    opaqueHash;
++      const char* path;
++    };
++
++    constexpr DcsMfdAtlas DcsMfdAtlases[] = {
++      { 0x96499013a529b6e3ull, "Mods\\aircraft\\AH-64D\\Cockpit\\IndicationResources\\CMWS\\CMWS_font.tga" },
++      { 0x644d61388c5d6e6eull, "Mods\\aircraft\\AH-64D\\Cockpit\\IndicationResources\\Displays\\MPD\\FontMPD_64.tga" },
++      { 0xa1bebab6862ba8a0ull, "Mods\\aircraft\\AH-64D\\Cockpit\\IndicationResources\\Displays\\MPD\\FontMPD_64_bold.tga" },
++      { 0x1b8fec8709ed0383ull, "Mods\\aircraft\\AH-64D\\Cockpit\\IndicationResources\\Displays\\MPD\\FontMPD_64_inv.tga" },
++      { 0x06968888b851fa93ull, "Mods\\aircraft\\AH-64D\\Cockpit\\IndicationResources\\Displays\\MPD\\FontMPD_64_inv_bold.tga" },
++      { 0xeea1524c0fb51cfull,  "Mods\\aircraft\\AH-64D\\Cockpit\\IndicationResources\\Displays\\MPD\\TSD\\MAP_CM_TT_symbols.tga" },
++      { 0xb9ef3e5d1f7bf8efull, "Mods\\aircraft\\AH-64D\\Cockpit\\IndicationResources\\Displays\\MPD\\TSD\\MAP_WP_SA_symbols.tga" },
++      { 0x339cd9232cb05583ull, "Mods\\aircraft\\AH-64D\\Cockpit\\IndicationResources\\Displays\\MPD\\indication_MPD.tga" },
++      { 0x60cf8b014afbfd34ull, "Mods\\aircraft\\AH-64D\\Cockpit\\IndicationResources\\Displays\\MPD\\indication_MPD_WPN.tga" },
++      { 0xfeb381c49f84e0a9ull, "Mods\\aircraft\\AH-64D\\Cockpit\\IndicationResources\\Displays\\MPD\\indication_MPD_WPN_fon.tga" },
++    };
++
++    uint16_t readLe16(const uint8_t* data) {
++      return uint16_t(data[0]) | (uint16_t(data[1]) << 8);
++    }
++
++    bool loadTgaAlpha(
++      const char*           path,
++            uint32_t        expectedWidth,
++            uint32_t        expectedHeight,
++            std::vector<uint8_t>& alpha) {
++      std::ifstream file(path, std::ios::binary);
++      if (!file)
++        return false;
++
++      uint8_t header[18] = { };
++      file.read(reinterpret_cast<char*>(header), sizeof(header));
++      if (!file || header[1] != 0 || (header[2] != 2 && header[2] != 10)
++       || header[16] != 32 || readLe16(header + 12) != expectedWidth
++       || readLe16(header + 14) != expectedHeight)
++        return false;
++
++      file.seekg(header[0], std::ios::cur);
++      if (!file)
++        return false;
++
++      const bool topOrigin = header[17] & 0x20;
++      const bool rightOrigin = header[17] & 0x10;
++      const size_t pixelCount = size_t(expectedWidth) * expectedHeight;
++      alpha.resize(pixelCount);
++
++      auto storePixel = [&] (size_t fileIndex, const uint8_t* pixel) {
++        const uint32_t fileY = uint32_t(fileIndex / expectedWidth);
++        const uint32_t fileX = uint32_t(fileIndex % expectedWidth);
++        const uint32_t y = topOrigin ? fileY : expectedHeight - 1 - fileY;
++        const uint32_t x = rightOrigin ? expectedWidth - 1 - fileX : fileX;
++        alpha[size_t(y) * expectedWidth + x] = pixel[3];
++      };
++
++      size_t output = 0;
++      uint8_t pixel[4];
++      if (header[2] == 2) {
++        while (output < pixelCount) {
++          file.read(reinterpret_cast<char*>(pixel), sizeof(pixel));
++          if (!file)
++            return false;
++          storePixel(output++, pixel);
++        }
++      } else {
++        while (output < pixelCount) {
++          uint8_t packet = 0;
++          file.read(reinterpret_cast<char*>(&packet), 1);
++          if (!file)
++            return false;
++          const uint32_t count = (packet & 0x7f) + 1;
++          if (output + count > pixelCount)
++            return false;
++          if (packet & 0x80) {
++            file.read(reinterpret_cast<char*>(pixel), sizeof(pixel));
++            if (!file)
++              return false;
++            for (uint32_t i = 0; i < count; i++)
++              storePixel(output++, pixel);
++          } else {
++            for (uint32_t i = 0; i < count; i++) {
++              file.read(reinterpret_cast<char*>(pixel), sizeof(pixel));
++              if (!file)
++                return false;
++              storePixel(output++, pixel);
++            }
++          }
++        }
++      }
++
++      return true;
++    }
++
++    uint64_t hashRgbaTexture(
++      const D3D11_COMMON_TEXTURE_DESC& desc,
++      const D3D11_SUBRESOURCE_DATA&    data) {
++      uint64_t hash = 1469598103934665603ull;
++      const auto* base = reinterpret_cast<const uint8_t*>(data.pSysMem);
++      const uint32_t rowBytes = std::min<uint32_t>(data.SysMemPitch, desc.Width * 4);
++      for (uint32_t y = 0; y < desc.Height; y++) {
++        const auto* row = base + size_t(y) * data.SysMemPitch;
++        for (uint32_t x = 0; x < rowBytes; x++) {
++          hash ^= row[x];
++          hash *= 1099511628211ull;
++        }
++      }
++      return hash;
++    }
++
++  }
+   
+   constexpr uint32_t D3D11DXGIDevice::DefaultFrameLatency;
+ 
+@@ -239,10 +354,90 @@ namespace dxvk {
+     
+     if (!ppTexture2D)
+       return S_FALSE;
+-    
++
++    const D3D11_SUBRESOURCE_DATA* uploadData = pInitialData;
++    std::vector<D3D11_SUBRESOURCE_DATA> repairedSubresources;
++    std::vector<std::vector<uint8_t>> repairedStorage;
++
++    if (pInitialData && pInitialData[0].pSysMem && desc.ArraySize == 1
++     && desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM
++     && ((desc.Width == 512 && (desc.Height == 64 || desc.Height == 512))
++      || (desc.Width == 2048 && desc.Height == 2048))) {
++      const uint64_t opaqueHash = hashRgbaTexture(desc, pInitialData[0]);
++      const DcsMfdAtlas* atlas = nullptr;
++      for (const auto& candidate : DcsMfdAtlases) {
++        if (candidate.opaqueHash == opaqueHash) {
++          atlas = &candidate;
++          break;
++        }
++      }
++
++      std::vector<uint8_t> alpha;
++      const char* dcsRoot = std::getenv("DCS_MFD_ROOT");
++      const std::string atlasPath = atlas && dcsRoot
++        ? std::string(dcsRoot) + "\\" + atlas->path
++        : std::string();
++      if (atlas && !atlasPath.empty()
++       && loadTgaAlpha(atlasPath.c_str(), desc.Width, desc.Height, alpha)) {
++        repairedSubresources.assign(pInitialData, pInitialData + desc.MipLevels);
++        repairedStorage.resize(desc.MipLevels);
++        uint32_t mipWidth = desc.Width;
++        uint32_t mipHeight = desc.Height;
++
++        for (uint32_t mip = 0; mip < desc.MipLevels; mip++) {
++          const auto& source = pInitialData[mip];
++          if (!source.pSysMem || source.SysMemPitch < mipWidth * 4)
++            break;
++
++          const size_t byteCount = size_t(source.SysMemPitch) * mipHeight;
++          repairedStorage[mip].resize(byteCount);
++          std::memcpy(repairedStorage[mip].data(), source.pSysMem, byteCount);
++
++          for (uint32_t y = 0; y < mipHeight; y++) {
++            auto* row = repairedStorage[mip].data() + size_t(y) * source.SysMemPitch;
++            for (uint32_t x = 0; x < mipWidth; x++)
++              row[x * 4 + 3] = alpha[size_t(y) * mipWidth + x];
++          }
++
++          repairedSubresources[mip].pSysMem = repairedStorage[mip].data();
++
++          if (mip + 1 < desc.MipLevels) {
++            const uint32_t nextWidth = std::max(1u, mipWidth / 2);
++            const uint32_t nextHeight = std::max(1u, mipHeight / 2);
++            std::vector<uint8_t> nextAlpha(size_t(nextWidth) * nextHeight);
++            for (uint32_t y = 0; y < nextHeight; y++) {
++              for (uint32_t x = 0; x < nextWidth; x++) {
++                uint32_t sum = 0;
++                uint32_t count = 0;
++                for (uint32_t oy = 0; oy < 2; oy++) {
++                  const uint32_t sy = y * 2 + oy;
++                  if (sy >= mipHeight)
++                    continue;
++                  for (uint32_t ox = 0; ox < 2; ox++) {
++                    const uint32_t sx = x * 2 + ox;
++                    if (sx < mipWidth) {
++                      sum += alpha[size_t(sy) * mipWidth + sx];
++                      count += 1;
++                    }
++                  }
++                }
++                nextAlpha[size_t(y) * nextWidth + x] = uint8_t((sum + count / 2) / count);
++              }
++            }
++            alpha = std::move(nextAlpha);
++            mipWidth = nextWidth;
++            mipHeight = nextHeight;
++          }
++        }
++
++        uploadData = repairedSubresources.data();
++        Logger::info(str::format("DCS-MFD repaired alpha for ", atlas->path));
++      }
++    }
++
+     try {
+       Com<D3D11Texture2D> texture = new D3D11Texture2D(this, &desc, nullptr, nullptr);
+-      m_initializer->InitTexture(texture->GetCommonTexture(), pInitialData);
++      m_initializer->InitTexture(texture->GetCommonTexture(), uploadData);
+       *ppTexture2D = texture.ref();
+       return S_OK;
+     } catch (const DxvkError& e) {

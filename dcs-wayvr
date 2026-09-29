@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly unit=dcs-wayvr.service
+case "${1:-toggle}" in
+  stop) exec systemctl --user stop "$unit" ;;
+  status) exec systemctl --user status "$unit" --no-pager ;;
+  start|toggle) ;;
+  *) printf 'Usage: dcs-wayvr [start|toggle|stop|status]\n' >&2; exit 2 ;;
+esac
+
+if systemctl --user is-active --quiet "$unit"; then
+  [[ "${1:-toggle}" == start ]] || "$HOME/.local/bin/wayvrctl" show-hide
+  exit 0
+fi
+[[ -S "${XDG_RUNTIME_DIR:-/run/user/$UID}/monado_comp_ipc" ]] || {
+  printf 'Start DCS World VR through Monado first.\n' >&2
+  exit 1
+}
+systemctl --user import-environment DISPLAY WAYLAND_DISPLAY XAUTHORITY \
+  XDG_CURRENT_DESKTOP XDG_SESSION_TYPE >/dev/null 2>&1 || true
+systemctl --user reset-failed "$unit"
+systemctl --user start "$unit"
+for _ in {1..50}; do
+  if "$HOME/.local/bin/wayvrctl" handsfree set-mode hmd >/dev/null 2>&1; then
+    exit 0
+  fi
+  systemctl --user is-active --quiet "$unit" || break
+  sleep 0.1
+done
+systemctl --user stop "$unit"
+printf 'WayVR IPC did not become ready; see ~/Games/dcs-linux/wayvr.log.\n' >&2
+exit 1

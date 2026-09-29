@@ -1,0 +1,278 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly DCS_PREFIX="${DCS_PREFIX_PATH:-${WINEPREFIX:-$HOME/Games/dcs-linux/prefix-ge11}}"
+readonly DCS_SAVED="$DCS_PREFIX/pfx/drive_c/users/steamuser/Saved Games/DCS"
+readonly INPUT_ROOT="$DCS_SAVED/Config/Input"
+readonly DCS_LOG="$DCS_SAVED/Logs/dcs.log"
+readonly TEMPLATE_ROOT="$HOME/.local/share/dcs-linux/input-templates"
+
+readonly -a MAPPINGS=(
+  'F-16C_50|Gudsen MOZA AB9 FFB Base|f16-ab9.diff.lua'
+  'F-16C_50|L-VPC Rotor TCS PLUS|f16-rotor-tcs.diff.lua'
+  'F-16C_50|L-VPC MongoosT-50CM3|f16-cm3.diff.lua'
+  'F-16C_50|MFG Crosswind V2_3|f16-mfg.diff.lua'
+  'AH-64D_BLK_II_PLT|Gudsen MOZA AB9 FFB Base|apache-pilot-ab9.diff.lua'
+  'AH-64D_BLK_II_PLT|L-VPC Rotor TCS PLUS|apache-pilot-rotor-tcs.diff.lua'
+  'AH-64D_BLK_II_PLT|L-VPC MongoosT-50CM3|apache-pilot-cm3.diff.lua'
+  'AH-64D_BLK_II_PLT|MFG Crosswind V2_3|apache-pilot-mfg.diff.lua'
+  'AH-64D_BLK_II_CPG|Gudsen MOZA AB9 FFB Base|apache-cpg-ab9.diff.lua'
+  'AH-64D_BLK_II_CPG|L-VPC Rotor TCS PLUS|apache-cpg-rotor-tcs.diff.lua'
+  'AH-64D_BLK_II_CPG|L-VPC MongoosT-50CM3|apache-cpg-cm3.diff.lua'
+  'AH-64D_BLK_II_CPG|MFG Crosswind V2_3|apache-cpg-mfg.diff.lua'
+  'AH-64D_BLK_II_AI_Menu|L-VPC MongoosT-50CM3|apache-ai-menu-cm3.diff.lua'
+)
+
+readonly -a DEVICES=(
+  'Gudsen MOZA AB9 FFB Base'
+  'L-VPC Rotor TCS PLUS'
+  'L-VPC MongoosT-50CM3'
+  'MFG Crosswind V2_3'
+)
+
+latest_guid() {
+  local device="$1"
+  local line
+
+  [[ -f "$DCS_LOG" ]] || return 1
+  line="$(grep -F "created [$device] with full id [$device {" "$DCS_LOG" | tail -n 1 || true)"
+  if [[ "$line" =~ \{([[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12})\} ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
+    return 0
+  fi
+  return 1
+}
+
+capture_now() {
+  local mapping module device template guid source captured=0
+
+  mkdir -p "$TEMPLATE_ROOT"
+  for mapping in "${MAPPINGS[@]}"; do
+    IFS='|' read -r module device template <<<"$mapping"
+    guid="$(latest_guid "$device" || true)"
+    [[ -n "$guid" ]] || continue
+    source="$INPUT_ROOT/$module/joystick/$device {$guid}.diff.lua"
+    if [[ -s "$source" ]]; then
+      cp -- "$source" "$TEMPLATE_ROOT/$template"
+      captured=$((captured + 1))
+    fi
+  done
+  printf 'Captured %d current managed input profile(s).\n' "$captured"
+}
+
+sync_now() {
+  local mapping module device template guid target synced=0 missing=0
+
+  for mapping in "${MAPPINGS[@]}"; do
+    IFS='|' read -r module device template <<<"$mapping"
+    if [[ ! -s "$TEMPLATE_ROOT/$template" ]]; then
+      printf 'Missing input template: %s\n' "$TEMPLATE_ROOT/$template" >&2
+      missing=$((missing + 1))
+      continue
+    fi
+    guid="$(latest_guid "$device" || true)"
+    if [[ -z "$guid" ]]; then
+      printf 'DCS has not reported a GUID for %s.\n' "$device" >&2
+      missing=$((missing + 1))
+      continue
+    fi
+    target="$INPUT_ROOT/$module/joystick/$device {$guid}.diff.lua"
+    mkdir -p "$(dirname "$target")"
+    cp -- "$TEMPLATE_ROOT/$template" "$target"
+    synced=$((synced + 1))
+  done
+  printf 'Synchronized %d managed input profile(s) to current DCS GUIDs.\n' "$synced"
+  (( missing == 0 ))
+}
+
+device_aliases() {
+  local device="$1"
+
+  printf '%s\n' "$device"
+  if [[ "$device" == 'Gudsen MOZA AB9 FFB Base' ]]; then
+    # Older Wine/DCS sessions exposed the same hardware without the vendor
+    # prefix. Treat those profiles as valid sources for the current name.
+    printf '%s\n' 'MOZA AB9 FFB Base'
+  fi
+}
+
+sync_all_for_device() {
+  local device="$1" guid="$2"
+  local candidate base directory alias target source synced=0
+  local -a aliases=()
+  declare -A source_by_directory=()
+
+  mapfile -t aliases < <(device_aliases "$device")
+
+  while IFS= read -r -d '' candidate; do
+    base="${candidate##*/}"
+    for alias in "${aliases[@]}"; do
+      [[ "$base" == "$alias "\{*.diff.lua ]] || continue
+      directory="${candidate%/*}"
+      target="$directory/$device {$guid}.diff.lua"
+      [[ "$candidate" != "$target" ]] || break
+      source="${source_by_directory[$directory]:-}"
+      if [[ -z "$source" || "$candidate" -nt "$source" ]]; then
+        source_by_directory["$directory"]="$candidate"
+      fi
+      break
+    done
+  done < <(find "$INPUT_ROOT" -type f -path '*/joystick/*.diff.lua' -print0)
+
+  for directory in "${!source_by_directory[@]}"; do
+    target="$directory/$device {$guid}.diff.lua"
+    [[ -s "$target" ]] && continue
+    cp -- "${source_by_directory[$directory]}" "$target"
+    printf 'Activated %s for %s from %s.\n' \
+      "${directory#"$INPUT_ROOT/"}" "$device" \
+      "${source_by_directory[$directory]}"
+    synced=$((synced + 1))
+  done
+
+  printf 'Activated %d additional aircraft profile(s) for %s {%s}.\n' \
+    "$synced" "$device" "$guid"
+}
+
+sync_all_current() {
+  local device guid found=0
+
+  for device in "${DEVICES[@]}"; do
+    guid="$(latest_guid "$device" || true)"
+    if [[ -z "$guid" ]]; then
+      printf 'DCS has not reported a GUID for %s; leaving its saved profiles intact.\n' \
+        "$device" >&2
+      continue
+    fi
+    sync_all_for_device "$device" "$guid"
+    found=$((found + 1))
+  done
+  (( found > 0 ))
+}
+
+sync_reconnected_device() {
+  local wanted_device="$1" guid="$2"
+  local mapping module device template directory target candidate source="" synced=0
+
+  for mapping in "${MAPPINGS[@]}"; do
+    IFS='|' read -r module device template <<<"$mapping"
+    [[ "$device" == "$wanted_device" ]] || continue
+
+    directory="$INPUT_ROOT/$module/joystick"
+    target="$directory/$device {$guid}.diff.lua"
+    source=""
+    for candidate in "$directory/$device "{*.diff.lua; do
+      [[ -s "$candidate" && "$candidate" != "$target" ]] || continue
+      if [[ -z "$source" || "$candidate" -nt "$source" ]]; then
+        source="$candidate"
+      fi
+    done
+    if [[ -z "$source" ]]; then
+      source="$TEMPLATE_ROOT/$template"
+    fi
+    if [[ ! -s "$source" ]]; then
+      printf 'No recovery profile for reconnected device: %s / %s\n' \
+        "$module" "$device" >&2
+      continue
+    fi
+
+    mkdir -p "$directory"
+    cp -- "$source" "$target"
+    printf 'Recovered %s / %s for new GUID {%s} from %s.\n' \
+      "$module" "$device" "$guid" "$source"
+    synced=$((synced + 1))
+  done
+
+  # Recover every other aircraft profile saved for this controller too.
+  sync_all_for_device "$wanted_device" "$guid" || true
+
+  if (( synced > 0 )) && command -v notify-send >/dev/null; then
+    notify-send \
+      'DCS controller reconnected' \
+      "$wanted_device bindings recovered. Open Adjust Controls and Rescan Devices to reload them." \
+      || true
+  fi
+  (( synced > 0 ))
+}
+
+watch_running_dcs() {
+  local device guid
+  declare -A seen_guid=()
+
+  for device in "${DEVICES[@]}"; do
+    seen_guid["$device"]="$(latest_guid "$device" || true)"
+  done
+
+  while pgrep -f '[D]CS\.exe' >/dev/null; do
+    sleep 1
+    for device in "${DEVICES[@]}"; do
+      guid="$(latest_guid "$device" || true)"
+      [[ -n "$guid" ]] || continue
+      if [[ "$guid" != "${seen_guid[$device]:-}" ]]; then
+        printf 'Detected DCS GUID change for %s: {%s} -> {%s}.\n' \
+          "$device" "${seen_guid[$device]:-not previously detected}" "$guid"
+        sync_reconnected_device "$device" "$guid" || true
+      fi
+      seen_guid["$device"]="$guid"
+    done
+  done
+  capture_now
+}
+
+watch_launch() {
+  local old_header new_header dcs_seen=0
+
+  capture_now || true
+  old_header="$(head -n 1 "$DCS_LOG" 2>/dev/null || true)"
+
+  # DCS truncates dcs.log at each launch. Wait for the new header so stale
+  # END OF INIT/device lines cannot satisfy this launch's synchronization.
+  for _ in {1..300}; do
+    new_header="$(head -n 1 "$DCS_LOG" 2>/dev/null || true)"
+    [[ -n "$new_header" && "$new_header" != "$old_header" ]] && break
+    sleep 0.5
+  done
+
+  # Device enumeration completes well before the main menu. Start once any
+  # managed device appears, then allow the remaining devices two seconds to
+  # settle. Requiring every configured controller here prevents all profiles
+  # from syncing whenever one optional controller is disconnected.
+  for _ in {1..240}; do
+    if latest_guid 'Gudsen MOZA AB9 FFB Base' >/dev/null \
+      || latest_guid 'L-VPC Rotor TCS PLUS' >/dev/null \
+      || latest_guid 'L-VPC MongoosT-50CM3' >/dev/null \
+      || latest_guid 'MFG Crosswind V2_3' >/dev/null; then
+      sleep 2
+      sync_now || true
+      sync_all_current || true
+      break
+    fi
+    sleep 0.5
+  done
+
+  # Preserve any in-game binding edits as next launch's canonical templates.
+  for _ in {1..120}; do
+    if pgrep -f '[D]CS\.exe' >/dev/null; then
+      dcs_seen=1
+      break
+    fi
+    sleep 1
+  done
+  if (( dcs_seen == 1 )); then
+    watch_running_dcs
+  fi
+}
+
+case "${1:-}" in
+  capture-now) capture_now ;;
+  sync-now) sync_now ;;
+  sync-all-now)
+    sync_now || true
+    sync_all_current
+    ;;
+  watch) watch_launch ;;
+  watch-live) watch_running_dcs ;;
+  *)
+    printf 'Usage: dcs-input-sync {capture-now|sync-now|sync-all-now|watch|watch-live}\n' >&2
+    exit 2
+    ;;
+esac

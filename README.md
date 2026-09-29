@@ -1,5 +1,10 @@
 # DCS Linux VR + MOZA AB9
 
+The [September 29 VR refresh](VR_REFRESH.md) documents the newer isolated
+Proton runtime, direct gaze pipeline, supervised services, WayVR setup,
+verification, and rollback. Performance figures below refer to the earlier
+validated configuration.
+
 This repository is a tested field report and an early community implementation
 for running standalone DCS World on Linux with:
 

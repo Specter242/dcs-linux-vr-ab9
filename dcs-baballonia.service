@@ -1,0 +1,20 @@
+[Unit]
+Description=Baballonia direct gaze for DCS quad views
+BindsTo=dcs-eye-camera.service
+After=dcs-eye-camera.service
+PartOf=dcs-eye-tracking.target
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.local/share/dcs-linux/eye-tracking/baballonia-20260929
+ExecStartPre=%h/.local/bin/dcs-eye-tracking wait-camera
+ExecStart=%h/.local/share/dcs-linux/eye-tracking/baballonia-20260929/Baballonia.Desktop
+Environment=BABALLONIA_GAZE_STATUS_FILE=%t/dcs-eye-tracking/gaze.json
+RuntimeDirectory=dcs-eye-tracking
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=5
+StandardOutput=append:%h/Games/dcs-linux/eye-tracking/baballonia.log
+StandardError=inherit

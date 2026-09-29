@@ -1,0 +1,4 @@
+[Unit]
+Description=DCS direct eye-tracking session
+Requires=dcs-eye-camera.service dcs-baballonia.service
+After=dcs-eye-camera.service dcs-baballonia.service

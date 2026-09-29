@@ -3,6 +3,7 @@
 # Publish only this explicit, reviewed allowlist.
 *
 !.gitignore
+!.gitattributes
 !README.md
 !LICENSE
 !PUBLIC_GUIDE.md
@@ -24,3 +25,18 @@
 !ab9_spring_test.c
 !ab9_state.c
 !dcs-eye-osc-bridge.py
+!VR_REFRESH.md
+!dcs-linux
+!dcs-updater
+!dcs-umu
+!dcs-input-sync
+!dcs-eye-tracking
+!dcs-wayvr
+!dcs-eye-tracking.target
+!dcs-eye-camera.service
+!dcs-baballonia.service
+!dcs-wayvr.service
+!baballonia-dcs.patch
+!dcs-dxvk-ge11.patch
+!test_eye_health.py
+!test_mfd_upload.cpp

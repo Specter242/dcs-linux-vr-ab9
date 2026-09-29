@@ -1,0 +1,102 @@
+#!/usr/bin/env python3
+"""Manage DCS eye-tracking services and verify fresh inferred gaze."""
+import argparse
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import time
+import urllib.request
+
+TARGET = 'dcs-eye-tracking.target'
+CAMERA = 'dcs-eye-camera.service'
+TRACKER = 'dcs-baballonia.service'
+STATE = Path(os.environ.get('XDG_RUNTIME_DIR', f'/run/user/{os.getuid()}')) / 'dcs-eye-tracking'
+
+
+def systemctl(*args):
+    return subprocess.run(['systemctl', '--user', *args], text=True, capture_output=True)
+
+
+def active(unit):
+    return systemctl('is-active', '--quiet', unit).returncode == 0
+
+
+def camera_ready():
+    try:
+        with urllib.request.urlopen('http://127.0.0.1:8080/stream', timeout=2) as response:
+            return response.status == 200 and bool(response.read(256))
+    except (OSError, ValueError):
+        return False
+
+
+def gaze_status(path, now=None):
+    """Require recent successful gaze sends, rather than process presence."""
+    now = time.time() if now is None else now
+    try:
+        data = json.loads(path.read_text())
+        age = now - float(data['timestamp'])
+        fresh = 0 <= age <= 3 and int(data['eyeUpdates']) > 0 and int(data['dfrMessagesSent']) > 0
+        return dict(fresh=fresh, age_seconds=round(age, 2), samples=int(data['eyeUpdates']))
+    except (OSError, ValueError, TypeError, KeyError):
+        return dict(fresh=False, age_seconds=None, samples=0)
+
+
+def status():
+    result = dict(camera=active(CAMERA), tracker=active(TRACKER), gaze=gaze_status(STATE / 'gaze.json'))
+    result['ready'] = result['camera'] and result['tracker'] and result['gaze']['fresh']
+    return result
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('command', choices=('start', 'status', 'stop', 'wait-camera'))
+    parser.add_argument('--json', action='store_true')
+    args = parser.parse_args()
+    if args.command == 'stop':
+        result = systemctl('stop', TARGET, TRACKER, CAMERA)
+        if result.returncode:
+            print(result.stderr, file=sys.stderr)
+        return result.returncode
+    if args.command == 'wait-camera':
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            if camera_ready():
+                return 0
+            time.sleep(0.2)
+        print('Beyond camera stream did not produce data.', file=sys.stderr)
+        return 1
+    if args.command == 'start':
+        STATE.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if not active(TRACKER):
+            (STATE / 'gaze.json').unlink(missing_ok=True)
+        systemctl('reset-failed', CAMERA, TRACKER)
+        result = systemctl('start', TARGET)
+        if result.returncode:
+            print(result.stderr, file=sys.stderr)
+            systemctl('stop', TARGET, TRACKER, CAMERA)
+            return result.returncode
+        deadline = time.monotonic() + 25
+        while time.monotonic() < deadline:
+            if status()['ready']:
+                print('Eye tracking ready: direct OSC gaze is fresh.')
+                return 0
+            if not active(CAMERA) or not active(TRACKER):
+                break
+            time.sleep(0.25)
+        print('Eye tracking did not produce fresh gaze. See journalctl --user -u dcs-baballonia.service.', file=sys.stderr)
+        systemctl('stop', TARGET, TRACKER, CAMERA)
+        return 1
+    result = status()
+    if args.json:
+        print(json.dumps(result))
+    else:
+        print(f"Camera: {'running' if result['camera'] else 'stopped'}")
+        print(f"Baballonia: {'running' if result['tracker'] else 'stopped'}")
+        print(f"Direct gaze: {'fresh' if result['gaze']['fresh'] else 'stale or unavailable'}; samples={result['gaze']['samples']}; age={result['gaze']['age_seconds']} s")
+    return 0 if result['ready'] else 1
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())
