@@ -690,6 +690,15 @@ if [[ "$mode" == "vr" || "$mode" == "monado" ]]; then
     set_vr_desktop_refresh
     ensure_monado
     select_monado_runtime
+    if [[ "${DCS_REQUIRE_TRACKING:-1}" == "1" ]]; then
+      if ! "$HOME/.local/bin/dcs-xr-readiness" --wait 30; then
+        if command -v notify-send >/dev/null; then
+          notify-send --app-name='DCS World VR' 'Headset tracking is not ready' \
+            'Power on the Lighthouse base stations and place the Beyond in view of them.' || true
+        fi
+        exit 3
+      fi
+    fi
     ensure_wayvr
   fi
 

@@ -27,6 +27,9 @@ Monado still uses SteamVR's Lighthouse driver without the full SteamVR composito
 The launcher owns the Monado/game session, temporary runtime selection, and
 display refresh workaround. User systemd units own camera capture, Baballonia,
 and WayVR. The eye helper requires recent inferred gaze, not just live processes.
+The launcher first checks a live headset pose through a native headless OpenXR
+session. It waits up to 30 seconds for both position and orientation to become
+valid, then reports missing Lighthouse tracking and cleans up if they do not.
 Stopping the camera stops its dependent tracker; launcher shutdown cleans up
 workers it started and restores the previous runtime/display mode.
 
@@ -67,6 +70,18 @@ export DCS_MFD_ROOT='W:\dcs\Program Files\Eagle Dynamics\DCS World'
 Automatic dismissal of the authorization notice is off by default; opt in with
 `DCS_DISMISS_AUTHORIZATION_NOTICE=1` if wanted.
 
+For diagnostic stereo VR without the Windows eye/quad layers, use:
+
+```sh
+DCS_REQUIRE_TRACKING=0 DCS_WAYVR=0 \
+DISABLE_XR_APILAYER_MBUCCHIA_quad_views_foveated=1 \
+DISABLE_XR_APILAYER_MBUCCHIA_eye_trackers=1 dcs-linux monado
+```
+
+This can display the menu without a valid pose, but full Lighthouse tracking
+still needs to be restored before flying. Normal eye-tracked quad views keep
+the readiness check enabled.
+
 ## Rebuild and deployment
 
 Apply `dcs-dxvk-ge11.patch` to the DXVK revision above. Initialize its submodules,
@@ -96,6 +111,12 @@ These units are started on demand, not enabled as login services. The UMU
 wrapper expects the official 1.4.4 zipapp under
 `~/.local/share/dcs-linux/umu-1.4.4/umu/` and the WayVR unit expects the extracted
 26.8.0 AppImage under `~/.local/share/wayvr/squashfs-root/`.
+Build the native readiness helper against the system OpenXR loader and headers:
+
+```sh
+cc -std=c11 -D_POSIX_C_SOURCE=200809L -O2 -Wall -Wextra \
+  dcs-xr-readiness.c -lopenxr_loader -o "$HOME/.local/bin/dcs-xr-readiness"
+```
 
 ## Verification and remaining checks
 
@@ -110,15 +131,24 @@ wrapper expects the official 1.4.4 zipapp under
 - DCS accepted direct gaze, detected all four flight controls including native
   AB9 force-feedback capability, and created four OpenXR view swapchains.
 - DCS reached its desktop main menu on the updated game and Proton runtime.
+- Basic stereo VR also reached the menu with the Windows eye/quad layers disabled.
+- The native readiness check detected invalid headset pose flags and exited
+  before starting DCS, restoring the previous runtime and display mode.
 - Monado acquired the Beyond's DP-2 display lease at combined 5088×2544.
 - WayVR connected to Monado and captured DP-3 through PipeWire.
 - Gaze freshness boundary and corrupt-record tests, shell syntax checks, and
   systemd unit validation passed.
 
-VR menu/mission rendering, Lighthouse pose, in-headset gaze alignment,
+Quad-view menu/mission rendering, Lighthouse pose, in-headset gaze alignment,
 physical force feedback, and new performance numbers still require live
 validation. Both the updated and preserved Proton versions paused at the
-loading screen during initial checks without a valid headset pose. The AB9
+loading screen during initial checks without a valid headset pose. Source
+inspection identified the quad-view layer's indefinite wait for valid views
+in [cacheStereoView](https://github.com/mbucchia/Quad-Views-Foveated/blob/79855a001302472a0f6c0703567dfe8ebfa6f988/openxr-api-layer/layer.cpp#L2750).
+Disabling only the eye layer did not resolve that wait. The native readiness
+check addresses the startup hang without changing the quad-view DLL. Its
+successful-pose path still needs verification with powered, visible base
+stations. The AB9
 reported APP state 2 (internal error) despite DirectInput/FFB being enabled;
 its physical recovery is separate from USB enumeration and driver readiness.
 One diagnostic query for the session state of a non-session libmonado client

@@ -40,3 +40,4 @@
 !dcs-dxvk-ge11.patch
 !test_eye_health.py
 !test_mfd_upload.cpp
+!dcs-xr-readiness.c
