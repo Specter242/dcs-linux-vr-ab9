@@ -41,3 +41,6 @@
 !test_eye_health.py
 !test_mfd_upload.cpp
 !dcs-xr-readiness.c
+!dcs-vr-benchmark.py
+!test_vr_benchmark.py
+!VR_BENCHMARK.md
