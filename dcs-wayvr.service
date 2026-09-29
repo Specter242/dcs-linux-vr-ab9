@@ -4,7 +4,7 @@ Description=WayVR desktop overlay for the DCS Monado session
 [Service]
 Type=simple
 Environment=XR_RUNTIME_JSON=/usr/share/openxr/1/openxr_monado.json
-ExecStart=%h/.local/share/wayvr/squashfs-root/AppRun --openxr --no-autostart
+ExecStart=%h/.local/share/wayvr/squashfs-root/AppRun --openxr --no-autostart --show
 Restart=on-failure
 RestartSec=3
 TimeoutStopSec=5
