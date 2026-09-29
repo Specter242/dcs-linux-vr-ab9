@@ -57,6 +57,8 @@ The usual DCS World VR application entry selects the updated runtime. Local
 application entries also expose the previous Proton runtime and WayVR toggle.
 WayVR uses the main monitor's KDE sharing permission; its restore token stays
 in the user's private config. HMD pointer mode supports use without VR controllers.
+The DCS launcher starts WayVR hidden so the desktop does not cover the game.
+Use `dcs-wayvr` or the WayVR application entry to show or hide it when needed.
 
 `DCS_PREFIX_PATH` and `DCS_PROTON_PATH` override the selected game environment.
 Input synchronization follows that prefix and migrates saved bindings to the

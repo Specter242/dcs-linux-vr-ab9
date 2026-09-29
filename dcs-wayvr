@@ -23,6 +23,7 @@ systemctl --user reset-failed "$unit" >/dev/null 2>&1 || true
 systemctl --user start "$unit"
 for _ in {1..50}; do
   if "$HOME/.local/bin/wayvrctl" handsfree set-mode hmd >/dev/null 2>&1; then
+    [[ "${1:-toggle}" == start ]] || "$HOME/.local/bin/wayvrctl" show-hide
     exit 0
   fi
   systemctl --user is-active --quiet "$unit" || break
