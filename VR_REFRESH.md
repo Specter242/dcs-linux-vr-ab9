@@ -37,6 +37,8 @@ eye output, and writes an atomic gaze health record. It also fixes capture
 module placement when publishing to a custom output directory. The existing
 frame-disposal and diagnostic changes are included. Personal model files and
 settings are excluded from this repository.
+The desktop app also closes its UI lifetime on systemd's stop signal; live
+start/stop verification now reports a clean exit instead of a stop timeout.
 
 ## Commands
 
@@ -107,17 +109,22 @@ wrapper expects the official 1.4.4 zipapp under
   Stopping camera capture stopped the dependent tracker and invalidated readiness.
 - DCS accepted direct gaze, detected all four flight controls including native
   AB9 force-feedback capability, and created four OpenXR view swapchains.
+- DCS reached its desktop main menu on the updated game and Proton runtime.
 - Monado acquired the Beyond's DP-2 display lease at combined 5088×2544.
 - WayVR connected to Monado and captured DP-3 through PipeWire.
 - Gaze freshness boundary and corrupt-record tests, shell syntax checks, and
   systemd unit validation passed.
 
-Full menu/mission rendering, Lighthouse pose, in-headset gaze alignment,
+VR menu/mission rendering, Lighthouse pose, in-headset gaze alignment,
 physical force feedback, and new performance numbers still require live
 validation. Both the updated and preserved Proton versions paused at the
 loading screen during initial checks without a valid headset pose. The AB9
 reported APP state 2 (internal error) despite DirectInput/FFB being enabled;
 its physical recovery is separate from USB enumeration and driver readiness.
+One diagnostic query for the session state of a non-session libmonado client
+triggered a Monado crash; session queries for control clients were discontinued.
+The launcher stopped DCS, restored the global runtime symlink and monitor
+refresh, and left no camera/overlay workers running after that failure.
 
 Private backups, downloaded assets, verification reports, and build/startup
 logs are under `~/Games/dcs-linux/updates/20260929/`. The original GE10 runtime

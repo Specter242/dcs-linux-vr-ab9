@@ -22,6 +22,39 @@ index 3f351ec..20a4811 100644
      </Target>
  
      <!-- SkiaSharp is currently broken on ARM for some reason -->
+diff --git a/src/Baballonia.Desktop/Program.cs b/src/Baballonia.Desktop/Program.cs
+index c187d65..6316c17 100644
+--- a/src/Baballonia.Desktop/Program.cs
++++ b/src/Baballonia.Desktop/Program.cs
+@@ -1,9 +1,12 @@
+ ﻿using Avalonia;
+ using Baballonia.Contracts;
++using Avalonia.Controls.ApplicationLifetimes;
++using Avalonia.Threading;
+ using Baballonia.Desktop.Calibration;
+ using Baballonia.Desktop.Captures;
+ using Microsoft.Extensions.DependencyInjection;
+ using System;
++using System.Runtime.InteropServices;
+ using System.Threading;
+ using Velopack;
+ using TrainerService = Baballonia.Desktop.Calibration.TrainerService;
+@@ -51,6 +54,15 @@ sealed class Program
+ 
+         try
+         {
++            // Close the UI lifetime when systemd stops the service.
++            using var terminate = OperatingSystem.IsLinux()
++                ? PosixSignalRegistration.Create(PosixSignal.SIGTERM, context =>
++                {
++                    context.Cancel = true;
++                    Dispatcher.UIThread.Post(() =>
++                        (Application.Current?.ApplicationLifetime as IClassicDesktopStyleApplicationLifetime)?.Shutdown());
++                })
++                : null;
+             var builder = BuildAvaloniaApp();
+             return builder.StartWithClassicDesktopLifetime(args);
+         }
 diff --git a/src/Baballonia/Services/DefaultInferenceRunner.cs b/src/Baballonia/Services/DefaultInferenceRunner.cs
 index cee16f7..4d8019a 100644
 --- a/src/Baballonia/Services/DefaultInferenceRunner.cs
