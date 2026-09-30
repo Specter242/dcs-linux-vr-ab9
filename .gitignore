@@ -46,3 +46,9 @@
 !VR_BENCHMARK.md
 !dcs-vr-quality.py
 !test_vr_quality.py
+!dcs-vr-feather.py
+!test_vr_feather.py
+!test_qvf_feather.cpp
+!qvf-continuous-feather.patch
+!VR_FEATHER.md
+!THIRD_PARTY_NOTICES.md

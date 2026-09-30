@@ -6,6 +6,8 @@ verification, and rollback. The [current benchmark and clarity tuning](VR_BENCHM
 records fresh compositor content and user-confirmed readability improvements.
 Performance figures below refer to the earlier configuration and observation
 method; they are not directly comparable to the new measurements.
+The [continuous-feather experiment](VR_FEATHER.md) documents a fingerprinted
+QuadViews shader change and GPU readback checks for a smoother focus boundary.
 
 This repository is a tested field report and an early community implementation
 for running standalone DCS World on Linux with:

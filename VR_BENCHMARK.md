@@ -122,9 +122,12 @@ The installed [QVF projection shader](https://github.com/mbucchia/Quad-Views-Fov
 sets focus alpha to `isInside * max(0.5, s.x * s.y)`. Focus contribution therefore
 jumps to at least one half at the rectangle boundary. More edge smoothing
 cannot eliminate this floor. A continuous zero-to-one feather is a concrete
-software experiment, but has not been deployed: it needs shader compilation,
-GPU readback checks, and headset comparison. Preserve zero-smoothing behavior,
-the sharp core, alpha handling, and format-aware sRGB decode/encode.
+software experiment. The user authorized it after this benchmark: the
+fingerprinted alpha-floor change passed 12 GPU readback cases and was installed
+for headset comparison. It preserves zero-smoothing behavior, the sharp core,
+alpha handling, and format-aware sRGB decode/encode. See
+[the continuous-feather experiment](VR_FEATHER.md). The benchmark table above
+predates this shader change.
 
 Pimax's transferable guidance is to adjust focus size, focus resolution, and
 peripheral resolution independently and verify gaze calibration. Its vendor
