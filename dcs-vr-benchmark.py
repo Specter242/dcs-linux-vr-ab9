@@ -67,6 +67,10 @@ def read_records(path, schema):
 
 
 def summarize(frames, used, begin, end, hz):
+    frame_by_id = {f.frame_id: f for f in frames}
+    first_latch = {}
+    for latch in sorted(used, key=lambda u: u.when_ns):
+        first_latch.setdefault(latch.session_frame_id, latch.when_ns)
     frames = [f for f in frames if begin <= f.when_gpu_done_ns < end and not f.discarded]
     used = sorted((u for u in used if begin <= u.when_ns < end), key=lambda u: u.system_frame_id)
     if len(frames) < 2 or len(used) < 2:
@@ -77,7 +81,17 @@ def summarize(frames, used, begin, end, hz):
                  for a, b in zip(sorted(frames, key=lambda f: f.when_gpu_done_ns),
                                  sorted(frames, key=lambda f: f.when_gpu_done_ns)[1:])]
     elapsed = (used[-1].when_ns - used[0].when_ns) / 1e9
+    if elapsed <= 0:
+        raise ValueError("Compositor latch timestamps must span a positive interval")
     work = [(f.when_gpu_done_ns - f.when_wait_woke_ns) / 1e6 for f in frames]
+    completion_to_latch = [(first_latch[f.frame_id] - f.when_gpu_done_ns) / 1e6
+                           for f in frames if f.frame_id in first_latch]
+    wake_to_latch = [(u.when_ns - frame_by_id[u.session_frame_id].when_wait_woke_ns) / 1e6
+                     for u in used if u.session_frame_id in frame_by_id]
+    longest_reuse, reuse_run = 0, 0
+    for previous, current in zip(used, used[1:]):
+        reuse_run = reuse_run + 1 if previous.session_frame_id == current.session_frame_id else 0
+        longest_reuse = max(longest_reuse, reuse_run)
     return {
         "window_seconds": (end - begin) / 1e9,
         "application_frames": len(frames), "compositor_latches": len(used),
@@ -85,6 +99,10 @@ def summarize(frames, used, begin, end, hz):
         "reused_frame_percent": 100 * repeats / (len(used) - 1),
         "frame_interval_ms": distribution(intervals),
         "application_work_ms": distribution(work),
+        "completion_to_first_latch_ms": distribution(completion_to_latch),
+        "wake_to_latch_ms": distribution(wake_to_latch),
+        "completed_frames_never_latched_percent": 100 * sum(f.frame_id not in first_latch for f in frames) / len(frames),
+        "longest_consecutive_reused_latches": longest_reuse,
         "work_over_refresh_budget_percent": 100 * sum(v > 1000 / hz for v in work) / len(work),
         "predicted_gpu_deadline_late_percent": 100 * sum(f.when_gpu_done_ns > f.predicted_gpu_done_time_ns for f in frames) / len(frames),
     }

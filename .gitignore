@@ -44,3 +44,5 @@
 !dcs-vr-benchmark.py
 !test_vr_benchmark.py
 !VR_BENCHMARK.md
+!dcs-vr-quality.py
+!test_vr_quality.py
