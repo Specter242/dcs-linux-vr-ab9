@@ -23,6 +23,10 @@ class QualityTests(unittest.TestCase):
         result = quality.update_quad('[other-app]\nturbo_mode=1\n', {"focus_multiplier": 1.1})
         self.assertTrue(result.startswith('focus_multiplier=1.1\n[other-app]'))
 
+    def test_single_app_override_is_not_changed_as_a_global_setting(self):
+        with self.assertRaises(ValueError):
+            quality.update_quad('[other-app]\nfocus_multiplier=2\n', {"focus_multiplier": 1.1})
+
     def test_backup_restore_and_newer_change_protection(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

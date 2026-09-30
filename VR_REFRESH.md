@@ -150,8 +150,12 @@ user power-cycled the AB9 and let calibration finish, it reported APP state 1
 (free), normal mode, DirectInput, and enabled force output. The launcher's
 native force-feedback readiness check passed.
 
-In-headset gaze alignment, mission rendering, physical force feedback, and
-new performance numbers remain unverified. Initial quad-view startups paused
+The user confirmed head tracking and gaze-following clarity in the headset.
+The Apache runway mission rendered with full quad views; the subsequent native
+clarity profile improved cockpit text and the boundary according to the user.
+[Benchmark results and tuning](VR_BENCHMARK.md) distinguish fresh compositor
+content from application FPS. Busy flight and physical force feedback remain
+untested in this refresh. Initial quad-view startups paused
 without a valid headset pose. Source inspection identified the layer's
 indefinite wait for valid views in
 [cacheStereoView](https://github.com/mbucchia/Quad-Views-Foveated/blob/79855a001302472a0f6c0703567dfe8ebfa6f988/openxr-api-layer/layer.cpp#L2750).

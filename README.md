@@ -2,8 +2,10 @@
 
 The [September 29 VR refresh](VR_REFRESH.md) documents the newer isolated
 Proton runtime, direct gaze pipeline, supervised services, WayVR setup,
-verification, and rollback. Performance figures below refer to the earlier
-validated configuration.
+verification, and rollback. The [current benchmark and clarity tuning](VR_BENCHMARK.md)
+records fresh compositor content and user-confirmed readability improvements.
+Performance figures below refer to the earlier configuration and observation
+method; they are not directly comparable to the new measurements.
 
 This repository is a tested field report and an early community implementation
 for running standalone DCS World on Linux with:
@@ -17,7 +19,7 @@ for running standalone DCS World on Linux with:
 - automatic per-aircraft AB9 base profiles; and
 - bounded supplementary effects generated from DCS telemetry.
 
-The tested machine reached a fully validated 74-76 delivered FPS in an AH-64D
+The earlier setup was observed at 74-76 FPS in an AH-64D
 on Syria at the Beyond's 75 Hz mode. This is one CachyOS/Radeon system, not a
 universal benchmark or an officially supported configuration.
 

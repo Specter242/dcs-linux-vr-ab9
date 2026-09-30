@@ -50,6 +50,9 @@ def update_quad(text, values):
         if matches > 1:
             raise ValueError(f"Multiple sections define {key}; review the configuration first")
         if matches:
+            match = re.search(pattern, text)
+            if re.search(r'(?m)^\s*\[', text[:match.start()]):
+                raise ValueError(f"An application override defines {key}; review the configuration first")
             text = re.sub(pattern, lambda m: m[1] + str(value), text)
         else:
             # Missing settings belong to the global section, before any app
