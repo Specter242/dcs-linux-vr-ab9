@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Give the VR menu entry its own executable identity in KDE application search.
+set -euo pipefail
+exec "$HOME/.local/bin/dcs-linux" monado "$@"

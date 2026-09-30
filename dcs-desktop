@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Keep monitor-only startup distinct from the VR entry in application search.
+set -euo pipefail
+exec "$HOME/.local/bin/dcs-linux" desktop "$@"
