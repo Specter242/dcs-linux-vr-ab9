@@ -53,7 +53,11 @@ The patched DLL was then verified in the live DCS process by its mapped file,
 inode, and installed hash. The Apache cockpit rendered, the layer reported
 quad views with smoothing 0.20 and sharpening 0.70, and direct gaze remained
 fresh. WayVR was disabled for the comparison. These establish startup and
-rendering compatibility; subjective boundary quality awaits the headset check.
+rendering compatibility. The user then compared the instruments and outside
+view in the headset and reported a smoother boundary with text still sharp.
+The experiment is retained at smoothing 0.20. No new throughput benchmark was
+performed for this shader change; the earlier clarity-profile numbers should
+not be attributed to it.
 
 ## Reproduce and restore
 
