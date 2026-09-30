@@ -53,7 +53,12 @@ DCS_WAYVR=0 dcs-linux monado             # start without WayVR
 DCS_RUNTIME=legacy dcs-linux monado      # previous GE10/prefix, current eye services
 ```
 
-The usual DCS World VR application entry selects the updated runtime. Local
+The primary **DCS World (Linux)** application entry now starts the updated VR
+runtime, equivalent to `dcs-linux monado`. **DCS World (Desktop)** preserves
+monitor-only startup. **DCS World VR (Linux)** remains an additional VR entry.
+KDE's application cache was rebuilt and its KService index verified after the
+dedicated VR entry did not appear in the user's menu search. Close and reopen
+the menu to refresh an already open search. Local
 application entries also expose the previous Proton runtime and WayVR toggle.
 WayVR uses the main monitor's KDE sharing permission; its restore token stays
 in the user's private config. HMD pointer mode supports use without VR controllers.
