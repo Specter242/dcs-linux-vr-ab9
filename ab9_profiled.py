@@ -59,6 +59,8 @@ def preset_date(profile: ab9_profile.Profile) -> int:
 def select_profile(
     profiles: list[ab9_profile.Profile], aircraft: str
 ) -> ab9_profile.Profile | None:
+    if not normalized(aircraft):
+        return None
     target = AIRCRAFT_ALIASES.get(aircraft, aircraft)
     candidates = [p for p in profiles if normalized(p.vehicle) == normalized(target)]
     if not candidates:

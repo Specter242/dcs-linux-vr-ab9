@@ -206,7 +206,8 @@ parked, or restart the relevant service with travel clear and no profile write
 in progress. The daemons and manual `ab9_profile.py apply` require readable JSON
 objects and valid parameter maps before using a new set. Presets for other
 devices or games are ignored. The existing string/list aircraft fields are
-accepted; an empty aircraft field matches no aircraft. A malformed custom
+accepted; automatic selection requires a nonblank aircraft identifier, so
+unnamed telemetry cannot activate a generic preset. A malformed custom
 preset blocks the load instead of silently selecting an official fallback;
 repair or remove the bad file identified in the log. Inspection commands such
 as `list` and `show` can still use readable presets while warning about invalid

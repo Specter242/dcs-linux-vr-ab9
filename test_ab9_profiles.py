@@ -206,6 +206,32 @@ class ProfileReloadTests(unittest.TestCase):
             self.assertEqual(len(sink.apply.call_args_list), 4)
             self.assertEqual(errors, "")
 
+    def test_missing_aircraft_identity_cannot_activate_generic_preset(self):
+        for vehicles in ("", [], [""]):
+            with self.subTest(vehicles=vehicles), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                write_profile(root, "JF-17", 4)
+                (root / "custom" / "generic.preset").write_text(json.dumps({
+                    "devices": ["AB9"], "games": ["dcs_world"], "vehicles": vehicles,
+                    "telemetry_params": {
+                        "propeller_vibration_switch": True,
+                        "engine_rumble_low_intensity": 20,
+                        "engine_rumble_high_intensity": 25,
+                    },
+                }), encoding="utf-8")
+                packets = [
+                    telemetry_packet("JF-17", 100),
+                    telemetry_packet("JF-17", 99),
+                    b"AB9_TELEMETRY\tengine_rpm_left,80;",
+                    b"AB9_TELEMETRY\taircraft_name,   ;engine_rpm_left,80;",
+                    telemetry_packet("JF-17", 100),
+                    telemetry_packet("JF-17", 99),
+                ]
+                sink, output, errors = self.run_telemetry(root, packets)
+                self.assertEqual(len(sink.apply.call_args_list), 4)
+                self.assertTrue(all("engine" not in args.args[0] for args in sink.apply.call_args_list))
+                self.assertEqual(errors, "")
+
     def test_profile_selector_refuses_broken_custom_preset_fallback(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
