@@ -20,6 +20,7 @@
 !ab9_telemetryd.py
 !moza.py
 !test_ab9_telemetry.py
+!test_ab9_profiles.py
 !ab9_test.c
 !ab9_spring_test.c
 !ab9_state.c

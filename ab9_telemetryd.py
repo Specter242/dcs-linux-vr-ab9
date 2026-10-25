@@ -38,6 +38,14 @@ ARM_FILE = Path.home() / ".config/ab9-ffb/telemetry-effects-enabled"
 ARM_PHRASE = "I UNDERSTAND TELEMETRY EFFECTS MAY MOVE THE STICK"
 OVERRIDES_FILE = Path.home() / ".config/ab9-ffb/telemetry-overrides.json"
 TELEMETRY_TIMEOUT = 0.5
+# Preserve the internal legacy names while accepting the renamed fields
+# reported in 1.0.4 presets. New names win within each input layer.
+TELEMETRY_ALIASES = {
+    "weapon_switch": "weapon_release_effect_enabled",
+    "weapon_release": "weapon_release_intensity",
+    "countermeasure_release": "cm_vibration_intensity",
+    "gun_vibration": "gun_vibration_intensity",
+}
 HELICOPTER_VEHICLES = {
     "AH-64D_BLK_II",
     "CH-47Fbl1",
@@ -73,6 +81,14 @@ def number(params: dict[str, Any], key: str, default: float = 0.0) -> float:
         return default
 
 
+def normalize_telemetry_params(params: dict[str, Any]) -> dict[str, Any]:
+    result = dict(params)
+    for legacy, renamed in TELEMETRY_ALIASES.items():
+        if renamed in params:
+            result[legacy] = params[renamed]
+    return result
+
+
 def armed() -> bool:
     try:
         return ARM_FILE.read_text(encoding="utf-8").strip() == ARM_PHRASE
@@ -85,12 +101,16 @@ def load_overrides() -> dict[str, dict[str, Any]]:
         document = json.loads(OVERRIDES_FILE.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return {}
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, ValueError) as exc:
         raise RuntimeError(f"could not read {OVERRIDES_FILE}: {exc}") from exc
+    if not isinstance(document, dict):
+        raise RuntimeError(f"{OVERRIDES_FILE}: overrides must be a JSON object")
     profiles = document.get("profiles", {})
     if not isinstance(profiles, dict):
         raise RuntimeError(f"{OVERRIDES_FILE}: 'profiles' must be an object")
-    return {key: value for key, value in profiles.items() if isinstance(value, dict)}
+    if any(not isinstance(value, dict) for value in profiles.values()):
+        raise RuntimeError(f"{OVERRIDES_FILE}: each profile override must be an object")
+    return profiles
 
 
 def parse_packet(packet: bytes) -> tuple[str, dict[str, str]]:
@@ -160,9 +180,11 @@ class EffectMixer:
         overrides: dict[str, Any] | None = None,
     ):
         self.profile = profile
-        self.params: dict[str, Any] = dict(profile.data.get("telemetry_params", {}))
+        self.params = normalize_telemetry_params(profile.data.get("telemetry_params", {}))
         if overrides:
-            self.params.update(overrides)
+            # Normalize separately so an override in either schema can replace
+            # a preset value, including an explicit False or zero.
+            self.params.update(normalize_telemetry_params(overrides))
         self.device_params: dict[str, Any] = profile.data.get("device_params", {})
         self.cap_percent = cap_percent
         self.gain = gain
@@ -448,7 +470,7 @@ class EffectMixer:
             30.0 * dynamic_scale * speed_scale,
         ).bounded(self.cap_percent)
 
-        copied_damper = float(self.device_params.get("bacic_damper", 0) or 0)
+        copied_damper = number(self.device_params, "bacic_damper", 0)
         damper_max = min(15.0, copied_damper * 0.5)
         damper = ConditionSpec(
             ecodes.FF_DAMPER,
@@ -764,10 +786,8 @@ def serve(do_apply: bool, cap_percent: float, gain: float) -> int:
             f"hardware output requested but {ARM_FILE} is absent or not armed"
         )
     sink: DryRunSink | EvdevSink = EvdevSink() if do_apply else DryRunSink()
-    profiles = ab9_profile.load_profiles()
-    overrides = load_overrides()
     mixer: EffectMixer | None = None
-    current_profile_id: str | None = None
+    current_aircraft: str | None = None
     last_packet = 0.0
     last_report = 0.0
     last_rendered = ""
@@ -802,33 +822,42 @@ def serve(do_apply: bool, cap_percent: float, gain: float) -> int:
                 if kind == "stop":
                     sink.clear()
                     mixer = None
-                    current_profile_id = None
+                    current_aircraft = None
                 elif kind == "telemetry":
                     last_packet = now
                     aircraft = telemetry.get("aircraft_name", "")
-                    profile = ab9_profiled.select_profile(profiles, aircraft)
-                    if profile is None:
-                        if current_profile_id is not None:
-                            print(f"No copied telemetry profile for {aircraft!r}", flush=True)
+                    if aircraft != current_aircraft:
                         sink.clear()
                         mixer = None
-                        current_profile_id = None
-                    else:
-                        if profile.profile_id != current_profile_id:
-                            sink.clear()
-                            mixer = EffectMixer(
-                                profile,
-                                cap_percent,
-                                gain,
-                                overrides.get(profile.vehicle, {}),
-                            )
-                            current_profile_id = profile.profile_id
+                        current_aircraft = aircraft
+                        try:
+                            profiles = ab9_profile.load_profiles(strict=True)
+                            overrides = load_overrides()
+                            profile = ab9_profiled.select_profile(profiles, aircraft)
+                            if profile is not None:
+                                mixer = EffectMixer(
+                                    profile,
+                                    cap_percent,
+                                    gain,
+                                    overrides.get(profile.vehicle, {}),
+                                )
+                        except (OSError, RuntimeError, ValueError) as exc:
                             print(
-                                f"Telemetry profile: {aircraft!r} -> "
-                                f"{profile.name} ({profile.source})",
+                                f"ERROR loading telemetry profile for {aircraft!r}: {exc}. "
+                                "Telemetry effects disabled until the next reload.",
+                                file=sys.stderr,
                                 flush=True,
                             )
-                        assert mixer is not None
+                        else:
+                            if profile is None:
+                                print(f"No copied telemetry profile for {aircraft!r}", flush=True)
+                            else:
+                                print(
+                                    f"Telemetry profile: {aircraft!r} -> "
+                                    f"{profile.name} ({profile.source})",
+                                    flush=True,
+                                )
+                    if mixer is not None:
                         effects = mixer.update(telemetry, now)
                         sink.apply(effects)
                         rendered = format_effects(effects)
@@ -842,6 +871,8 @@ def serve(do_apply: bool, cap_percent: float, gain: float) -> int:
             if last_packet and now - last_packet > TELEMETRY_TIMEOUT:
                 sink.clear()
                 last_packet = 0.0
+                mixer = None
+                current_aircraft = None
                 if not do_apply:
                     print("Telemetry timeout: effects cleared", flush=True)
     finally:

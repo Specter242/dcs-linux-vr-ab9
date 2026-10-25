@@ -182,7 +182,8 @@ SETTINGS = (
 SETTING_BY_KEY = {setting.key: setting for setting in SETTINGS}
 
 
-def load_profiles() -> list[Profile]:
+def load_profiles(*, strict: bool = False) -> list[Profile]:
+    """Inspect readable presets, or require a complete load for daemon use."""
     profiles: list[Profile] = []
     for source in ("official", "custom"):
         directory = PROFILE_ROOT / source
@@ -191,12 +192,31 @@ def load_profiles() -> list[Profile]:
         for path in sorted(directory.glob("*.preset")):
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError) as exc:
-                print(f"WARNING: cannot load {path}: {exc}", file=sys.stderr)
-                continue
-            if "AB9" not in data.get("devices", []):
-                continue
-            if "dcs_world" not in data.get("games", []):
+                if not isinstance(data, dict):
+                    raise ValueError("preset must be a JSON object")
+                devices = data.get("devices", [])
+                if not isinstance(devices, (list, str)):
+                    raise ValueError("preset devices must be a list or string")
+                if "AB9" not in devices:
+                    continue
+                games = data.get("games", [])
+                if not isinstance(games, (list, str)):
+                    raise ValueError("preset games must be a list or string")
+                if "dcs_world" not in games:
+                    continue
+                vehicles = data.get("vehicles", "")
+                if not isinstance(vehicles, (str, list)) or (
+                    isinstance(vehicles, list) and any(not isinstance(item, str) for item in vehicles)
+                ):
+                    raise ValueError("preset vehicles must be a string or list of strings")
+                for key in ("device_params", "telemetry_params"):
+                    if not isinstance(data.get(key, {}), dict):
+                        raise ValueError(f"preset {key} must be an object")
+            except (OSError, ValueError) as exc:
+                message = f"cannot load {path}: {exc}"
+                if strict:
+                    raise RuntimeError(message + "; refusing an incomplete preset load") from exc
+                print(f"WARNING: {message}", file=sys.stderr)
                 continue
             profiles.append(Profile(source, path, data))
     return profiles
@@ -363,11 +383,17 @@ def confirm_ready(profile: Profile) -> None:
 
 
 def apply_profile(profile: Profile, mode: str, assume_ready: bool) -> None:
+    started = time.monotonic()
     values = profile_values(profile, mode)
     moza.PORT = ab9_control.find_port()
     fd = moza.open_port()
     output_muted = False
     try:
+        print(
+            f"Reading AB9 base settings for {profile.vehicle} / {profile.name}; "
+            "profile application in progress. Stay parked until it completes.",
+            flush=True,
+        )
         if read_app_state(fd) != 1:
             raise RuntimeError("AB9 APP is not free; refusing profile writes")
 
@@ -392,20 +418,29 @@ def apply_profile(profile: Profile, mode: str, assume_ready: bool) -> None:
             readable[key] = setting
 
         changes = [key for key in values if key in current and current[key] != values[key]]
-        print(f"Profile: {profile.vehicle} / {profile.name} ({mode})")
-        print(f"Verified settings available: {len(readable)}; changes needed: {len(changes)}")
+        print(f"Profile: {profile.vehicle} / {profile.name} ({mode})", flush=True)
+        print(
+            f"Verified settings available: {len(readable)}; changes needed: {len(changes)}",
+            flush=True,
+        )
         for key in changes:
             print(f"  {readable[key].label}: {current[key]} -> {values[key]}")
         if not changes:
-            print("AB9 base settings already match this profile.")
+            print(
+                "AB9 base settings already match this profile. "
+                f"Check completed in {time.monotonic() - started:.1f}s.",
+                flush=True,
+            )
             return
 
         if not assume_ready:
             confirm_ready(profile)
 
         # Close the documented force-output gate before altering force layers.
+        muted_started = time.monotonic()
         ab9_control.write_value(fd, "Force-output disable gate", (0xDE,), 1, 2)
         output_muted = True
+        print(f"Force output muted; writing and verifying {len(changes)} settings.", flush=True)
         time.sleep(0.2)
 
         for key in changes:
@@ -426,14 +461,21 @@ def apply_profile(profile: Profile, mode: str, assume_ready: bool) -> None:
         ab9_control.write_value(fd, "FFB controller", (0xE1, 0x17), 1, 1)
         ab9_control.write_value(fd, "Force-output disable gate", (0xDE,), 0, 2)
         output_muted = False
-        print(f"Applied and verified {len(changes)} AB9 settings; force output restored.")
+        finished = time.monotonic()
+        print(
+            f"Applied and verified {len(changes)} AB9 settings; force output restored. "
+            f"Total {finished - started:.1f}s; muted for {finished - muted_started:.1f}s.",
+            flush=True,
+        )
     finally:
         os.close(fd)
         if output_muted:
             print(
                 "NOTICE: profile application did not restore force output. "
+                f"Elapsed {time.monotonic() - started:.1f}s. "
                 "The DCS launcher readiness check can reopen it after the cause is fixed.",
                 file=sys.stderr,
+                flush=True,
             )
 
 
@@ -462,8 +504,8 @@ def main() -> int:
     )
 
     args = parser.parse_args()
-    profiles = load_profiles()
     try:
+        profiles = load_profiles(strict=args.command == "apply")
         if args.command == "list":
             list_profiles(profiles, args.filter)
         elif args.command == "status":

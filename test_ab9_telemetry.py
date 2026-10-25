@@ -112,6 +112,71 @@ def synthetic_helicopter(vehicle="AH-64D_BLK_II"):
 
 
 class TelemetryTests(unittest.TestCase):
+    def weapon_event(self, params, field, overrides=None):
+        profile = synthetic_profile()
+        profile.data["telemetry_params"] = params
+        mixer = EffectMixer(profile, 15.0, overrides=overrides)
+        mixer.update(BASELINE, 100.0)
+        sample = dict(BASELINE)
+        sample[field] = str(int(sample[field]) - 1)
+        return mixer.update(sample, 100.05).get("weapon")
+
+    def test_weapon_effects_accept_both_preset_schemas(self):
+        schemas = (
+            dict(weapon_switch=1, gun_vibration=10, weapon_release=12, countermeasure_release=8),
+            dict(
+                weapon_release_effect_enabled=True,
+                gun_vibration_intensity=10,
+                weapon_release_intensity=12,
+                cm_vibration_intensity=8,
+            ),
+        )
+        for params in schemas:
+            original = dict(params)
+            for field, strength in (("cannon_shells", 10), ("payload_count", 12), ("flare", 8), ("chaff", 8)):
+                with self.subTest(params=params, field=field):
+                    effect = self.weapon_event(params, field)
+                    self.assertIsNotNone(effect)
+                    self.assertEqual(effect.percent, strength)
+            self.assertEqual(params, original)
+
+    def test_new_weapon_fields_preserve_disabled_and_zero_values(self):
+        params = dict(
+            weapon_switch=1,
+            weapon_release_effect_enabled=False,
+            gun_vibration=10,
+            gun_vibration_intensity=0,
+            weapon_release=12,
+            weapon_release_intensity=0,
+            countermeasure_release=8,
+            cm_vibration_intensity=0,
+        )
+        for switch in (False, 0, True):
+            params["weapon_release_effect_enabled"] = switch
+            for field in ("cannon_shells", "payload_count", "flare", "chaff"):
+                with self.subTest(switch=switch, field=field):
+                    self.assertIsNone(self.weapon_event(params, field))
+        # Isolate switch precedence from intensity precedence.
+        params["gun_vibration_intensity"] = 10
+        params["weapon_release_effect_enabled"] = False
+        self.assertIsNone(self.weapon_event(params, "cannon_shells"))
+
+    def test_weapon_overrides_take_precedence_across_schemas(self):
+        params = dict(weapon_release_effect_enabled=True, gun_vibration_intensity=10)
+        for overrides in (
+            {"weapon_switch": False},
+            {"weapon_release_effect_enabled": False},
+            {"gun_vibration": 0},
+            {"gun_vibration_intensity": 0},
+        ):
+            with self.subTest(overrides=overrides):
+                self.assertIsNone(self.weapon_event(params, "cannon_shells", overrides))
+        effect = self.weapon_event(params, "cannon_shells", {"gun_vibration": 100})
+        self.assertEqual(effect.percent, 15)
+        legacy = dict(weapon_switch=1, gun_vibration=10)
+        effect = self.weapon_event(legacy, "cannon_shells", {"gun_vibration_intensity": 6})
+        self.assertEqual(effect.percent, 6)
+
     def test_packet_parser(self):
         kind, fields = parse_packet(
             b"AB9_TELEMETRY\taircraft_name,P-51D;ias,82.5;cannon_shells,240;"
@@ -204,6 +269,16 @@ class TelemetryTests(unittest.TestCase):
         strong = effects["engine"].__class__(47.0, 18.0, 0).bounded(35.0, 2.0)
         self.assertIsNotNone(strong)
         self.assertEqual(strong.percent, 35.0)
+
+    def test_malformed_damping_value_disables_damper_without_crashing(self):
+        for value in ("abc", None, {}, [], float("nan"), float("inf")):
+            with self.subTest(value=value):
+                profile = synthetic_profile()
+                profile.data["device_params"]["bacic_damper"] = value
+                mixer = EffectMixer(profile, 15.0)
+                effects = mixer.update(dict(BASELINE, ias="100"), 100.0)
+                self.assertIn("dynamic-spring", effects)
+                self.assertNotIn("dynamic-damper", effects)
 
     def test_dynamic_pressure_condition_effects(self):
         profile = synthetic_profile()
