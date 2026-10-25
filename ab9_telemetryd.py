@@ -38,6 +38,14 @@ ARM_FILE = Path.home() / ".config/ab9-ffb/telemetry-effects-enabled"
 ARM_PHRASE = "I UNDERSTAND TELEMETRY EFFECTS MAY MOVE THE STICK"
 OVERRIDES_FILE = Path.home() / ".config/ab9-ffb/telemetry-overrides.json"
 TELEMETRY_TIMEOUT = 0.5
+# Preserve the internal legacy names while accepting the renamed fields
+# reported in Cockpit 1.0.4 presets. New names win within each input layer.
+TELEMETRY_ALIASES = {
+    "weapon_switch": "weapon_release_effect_enabled",
+    "weapon_release": "weapon_release_intensity",
+    "countermeasure_release": "cm_vibration_intensity",
+    "gun_vibration": "gun_vibration_intensity",
+}
 HELICOPTER_VEHICLES = {
     "AH-64D_BLK_II",
     "CH-47Fbl1",
@@ -71,6 +79,14 @@ def number(params: dict[str, Any], key: str, default: float = 0.0) -> float:
         return value if math.isfinite(value) else default
     except (TypeError, ValueError):
         return default
+
+
+def normalize_telemetry_params(params: dict[str, Any]) -> dict[str, Any]:
+    result = dict(params)
+    for legacy, renamed in TELEMETRY_ALIASES.items():
+        if renamed in params:
+            result[legacy] = params[renamed]
+    return result
 
 
 def armed() -> bool:
@@ -160,9 +176,11 @@ class EffectMixer:
         overrides: dict[str, Any] | None = None,
     ):
         self.profile = profile
-        self.params: dict[str, Any] = dict(profile.data.get("telemetry_params", {}))
+        self.params = normalize_telemetry_params(profile.data.get("telemetry_params", {}))
         if overrides:
-            self.params.update(overrides)
+            # Normalize separately so an override in either schema can replace
+            # a preset value, including an explicit False or zero.
+            self.params.update(normalize_telemetry_params(overrides))
         self.device_params: dict[str, Any] = profile.data.get("device_params", {})
         self.cap_percent = cap_percent
         self.gain = gain
