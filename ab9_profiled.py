@@ -83,14 +83,18 @@ def handle_aircraft(
     profiles: list[ab9_profile.Profile],
     do_apply: bool,
     mode: str,
-    last_profile_id: str | None,
-) -> str | None:
+    last_profile: ab9_profile.Profile | None,
+) -> ab9_profile.Profile | None:
     profile = select_profile(profiles, aircraft)
     if profile is None:
         print(f"DCS aircraft {aircraft!r}: no copied MOZA AB9 preset", flush=True)
         return None
-    if profile.profile_id == last_profile_id:
-        return last_profile_id
+    if (
+        last_profile is not None
+        and profile.profile_id == last_profile.profile_id
+        and profile.data == last_profile.data
+    ):
+        return last_profile
     print(
         f"DCS aircraft {aircraft!r}: selected {profile.profile_id} "
         f"({profile.name}, {mode})",
@@ -98,19 +102,18 @@ def handle_aircraft(
     )
     if not do_apply:
         print("Dry selection only; automatic AB9 writes are disabled.", flush=True)
-        return profile.profile_id
+        return profile
     if not armed():
         print(
             f"Refusing automatic AB9 write: {ARM_FILE} is absent or not armed.",
             flush=True,
         )
-        return profile.profile_id
+        return profile
     ab9_profile.apply_profile(profile, mode, assume_ready=True)
-    return profile.profile_id
+    return profile
 
 
 def listen(do_apply: bool, mode: str) -> None:
-    profiles = ab9_profile.load_profiles()
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind((HOST, PORT))
@@ -120,7 +123,7 @@ def listen(do_apply: bool, mode: str) -> None:
         flush=True,
     )
     last_aircraft: str | None = None
-    last_profile_id: str | None = None
+    last_profile: ab9_profile.Profile | None = None
     while True:
         packet, _ = sock.recvfrom(512)
         text = packet.decode("utf-8", errors="replace").strip()
@@ -131,13 +134,16 @@ def listen(do_apply: bool, mode: str) -> None:
             continue
         last_aircraft = aircraft
         try:
-            last_profile_id = handle_aircraft(
-                aircraft, profiles, do_apply, mode, last_profile_id
+            # Reload only on an aircraft transition, never on each repeated
+            # announcement: editing a file must not trigger live base writes.
+            profiles = ab9_profile.load_profiles()
+            last_profile = handle_aircraft(
+                aircraft, profiles, do_apply, mode, last_profile
             )
         except Exception as exc:
             print(f"ERROR applying profile for {aircraft!r}: {exc}", file=sys.stderr, flush=True)
             # Permit a retry when DCS reports another aircraft and later returns.
-            last_profile_id = None
+            last_profile = None
         time.sleep(0.05)
 
 
@@ -152,9 +158,9 @@ def main() -> int:
     parser.add_argument("--mode", choices=("exact-base", "native"), default="native")
     args = parser.parse_args()
 
-    profiles = ab9_profile.load_profiles()
     if args.once:
         try:
+            profiles = ab9_profile.load_profiles()
             handle_aircraft(args.once, profiles, args.apply, args.mode, None)
         except (OSError, RuntimeError, ValueError) as exc:
             print(f"ERROR: {exc}", file=sys.stderr)

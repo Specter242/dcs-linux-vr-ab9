@@ -71,7 +71,7 @@ Install Python's `evdev` package using your distribution or a virtual
 environment, then run the motor-safe tests:
 
 ```bash
-python -m unittest -v test_ab9_telemetry.py
+python -m unittest -v test_ab9_telemetry.py test_ab9_profiles.py
 python -m py_compile \
   moza.py ab9_control.py ab9_profile.py ab9_profiled.py ab9_telemetryd.py
 
@@ -80,9 +80,9 @@ cc -std=c11 -Wall -Wextra -Werror -O2 -o ab9_spring_test ab9_spring_test.c
 cc -std=c11 -Wall -Wextra -Werror -O2 -o ab9_state ab9_state.c
 ```
 
-The Python tests use synthetic fixtures and do not touch the motor. The C motor
-probes refuse to run unless their `--move-stick` danger acknowledgment is
-present.
+The Python tests use synthetic presets, scripted UDP input, and mocked serial
+calls; they do not open the AB9. The C motor probes refuse to run unless their
+`--move-stick` danger acknowledgment is present.
 
 ## Minimal AB9 install outline
 
@@ -121,9 +121,90 @@ load it from the existing `Export.lua` without replacing other exporters:
 dofile(lfs.writedir() .. [[Scripts\AB9ProfileExport.lua]])
 ```
 
-Run both daemons in dry-run mode first. Hardware writes remain disabled unless
-both `--apply` and the corresponding explicit arm file are present. The tested
-telemetry service clamps every synthesized effect to 15 percent.
+### Check profiles and telemetry first
+
+These commands do not write to the base. The aircraft identifier below is an
+example; choose one for which you have copied a preset:
+
+```bash
+python3 "$HOME/.local/libexec/ab9-ffb/ab9_profile.py" list
+python3 "$HOME/.local/libexec/ab9-ffb/ab9_profiled.py" --once 'Mi-8MT'
+python3 "$HOME/.local/libexec/ab9-ffb/ab9_telemetryd.py" --cap-percent 15
+```
+
+Do not run the foreground listener and the telemetry service at the same time.
+Enter an unpaused mission and look for `motor_output=DRY-RUN`, a matching
+`Telemetry profile:` line, and `DRY effects:` output. Stop the listener with
+Ctrl+C before starting its service.
+
+### Enable output deliberately
+
+**The following enables motor output. Clear the stick's full travel first.**
+The install outline does not create arm files or start these user services.
+Hardware writes require both `--apply` and the matching arm-file contents:
+
+```bash
+install -d "$HOME/.config/ab9-ffb"
+printf '%s\n' 'I UNDERSTAND TELEMETRY EFFECTS MAY MOVE THE STICK' \
+  > "$HOME/.config/ab9-ffb/telemetry-effects-enabled"
+systemctl --user start ab9-telemetryd.service
+```
+
+Telemetry selects its own copied aircraft preset; automatic base-profile writes
+are optional. To enable those as well, with the aircraft parked and travel clear:
+
+```bash
+printf '%s\n' 'I UNDERSTAND THE STICK MAY MOVE' \
+  > "$HOME/.config/ab9-ffb/auto-switch-enabled"
+systemctl --user start ab9-profiled.service
+journalctl --user -u ab9-profiled.service -u ab9-telemetryd.service -n 60 --no-pager
+```
+
+Wait for `Applied and verified ... force output restored` or `AB9 base settings
+already match this profile`, and check for errors before taking off. Reading,
+writing, and verifying many settings can take tens of seconds. Logs report the
+application's total duration and time spent with force output muted. A fixed
+three-second sleep is not a readiness check.
+
+The supplied telemetry service caps each synthesized effect at 15 percent. This
+is not a combined native-plus-telemetry force or calibrated torque limit. After
+any profile application has finished, stop the services with:
+
+```bash
+systemctl --user stop ab9-telemetryd.service ab9-profiled.service
+```
+
+This stops supplementary effects and automatic switching; native DCS FFB and
+previously applied base settings remain.
+
+### Preset versions and edits
+
+The telemetry mixer accepts the four reported weapon-effect renames between
+the 1.0.1 and 1.0.4 preset formats:
+
+- `weapon_switch` / `weapon_release_effect_enabled`
+- `weapon_release` / `weapon_release_intensity`
+- `countermeasure_release` / `cm_vibration_intensity`
+- `gun_vibration` / `gun_vibration_intensity`
+
+Within a preset, the newer name wins if both exist, including `false` or zero.
+Local overrides in `~/.config/ab9-ffb/telemetry-overrides.json` take precedence
+over the preset in either naming scheme. This covers these fields; newer curve
+formats and other renamed effects still require separate validation.
+
+Both daemons reload copied presets when DCS reports a different aircraft. The
+telemetry daemon also reloads overrides at that point. To pick up an edit,
+switch to another aircraft and back while parked, or restart the relevant
+service with travel clear and no profile write in progress. Editing a file
+alone does not trigger an automatic base write. After a telemetry timeout, the
+listener clears effects and resets its event counters before processing new
+data, preventing a stale ammunition count from creating a new weapon pulse.
+
+The reported loss of stick-axis input during aircraft changes is still
+unresolved. The profile timing logs can help identify a force-output pause;
+they do not establish the cause of an input dropout. Hardware testing should
+compare automatic profiles off, telemetry off, and native DCS FFB alone, and
+capture the corresponding user-service and USB/HID kernel logs.
 
 ## Critical Proton rule
 

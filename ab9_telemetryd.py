@@ -39,7 +39,7 @@ ARM_PHRASE = "I UNDERSTAND TELEMETRY EFFECTS MAY MOVE THE STICK"
 OVERRIDES_FILE = Path.home() / ".config/ab9-ffb/telemetry-overrides.json"
 TELEMETRY_TIMEOUT = 0.5
 # Preserve the internal legacy names while accepting the renamed fields
-# reported in Cockpit 1.0.4 presets. New names win within each input layer.
+# reported in 1.0.4 presets. New names win within each input layer.
 TELEMETRY_ALIASES = {
     "weapon_switch": "weapon_release_effect_enabled",
     "weapon_release": "weapon_release_intensity",
@@ -782,10 +782,8 @@ def serve(do_apply: bool, cap_percent: float, gain: float) -> int:
             f"hardware output requested but {ARM_FILE} is absent or not armed"
         )
     sink: DryRunSink | EvdevSink = EvdevSink() if do_apply else DryRunSink()
-    profiles = ab9_profile.load_profiles()
-    overrides = load_overrides()
     mixer: EffectMixer | None = None
-    current_profile_id: str | None = None
+    current_aircraft: str | None = None
     last_packet = 0.0
     last_report = 0.0
     last_rendered = ""
@@ -820,33 +818,32 @@ def serve(do_apply: bool, cap_percent: float, gain: float) -> int:
                 if kind == "stop":
                     sink.clear()
                     mixer = None
-                    current_profile_id = None
+                    current_aircraft = None
                 elif kind == "telemetry":
                     last_packet = now
                     aircraft = telemetry.get("aircraft_name", "")
-                    profile = ab9_profiled.select_profile(profiles, aircraft)
-                    if profile is None:
-                        if current_profile_id is not None:
-                            print(f"No copied telemetry profile for {aircraft!r}", flush=True)
+                    if aircraft != current_aircraft:
                         sink.clear()
                         mixer = None
-                        current_profile_id = None
-                    else:
-                        if profile.profile_id != current_profile_id:
-                            sink.clear()
+                        current_aircraft = aircraft
+                        profiles = ab9_profile.load_profiles()
+                        overrides = load_overrides()
+                        profile = ab9_profiled.select_profile(profiles, aircraft)
+                        if profile is None:
+                            print(f"No copied telemetry profile for {aircraft!r}", flush=True)
+                        else:
                             mixer = EffectMixer(
                                 profile,
                                 cap_percent,
                                 gain,
                                 overrides.get(profile.vehicle, {}),
                             )
-                            current_profile_id = profile.profile_id
                             print(
                                 f"Telemetry profile: {aircraft!r} -> "
                                 f"{profile.name} ({profile.source})",
                                 flush=True,
                             )
-                        assert mixer is not None
+                    if mixer is not None:
                         effects = mixer.update(telemetry, now)
                         sink.apply(effects)
                         rendered = format_effects(effects)
@@ -860,6 +857,8 @@ def serve(do_apply: bool, cap_percent: float, gain: float) -> int:
             if last_packet and now - last_packet > TELEMETRY_TIMEOUT:
                 sink.clear()
                 last_packet = 0.0
+                mixer = None
+                current_aircraft = None
                 if not do_apply:
                     print("Telemetry timeout: effects cleared", flush=True)
     finally:

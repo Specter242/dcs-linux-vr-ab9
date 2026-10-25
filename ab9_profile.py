@@ -363,11 +363,17 @@ def confirm_ready(profile: Profile) -> None:
 
 
 def apply_profile(profile: Profile, mode: str, assume_ready: bool) -> None:
+    started = time.monotonic()
     values = profile_values(profile, mode)
     moza.PORT = ab9_control.find_port()
     fd = moza.open_port()
     output_muted = False
     try:
+        print(
+            f"Reading AB9 base settings for {profile.vehicle} / {profile.name}; "
+            "profile application in progress. Stay parked until it completes.",
+            flush=True,
+        )
         if read_app_state(fd) != 1:
             raise RuntimeError("AB9 APP is not free; refusing profile writes")
 
@@ -392,20 +398,29 @@ def apply_profile(profile: Profile, mode: str, assume_ready: bool) -> None:
             readable[key] = setting
 
         changes = [key for key in values if key in current and current[key] != values[key]]
-        print(f"Profile: {profile.vehicle} / {profile.name} ({mode})")
-        print(f"Verified settings available: {len(readable)}; changes needed: {len(changes)}")
+        print(f"Profile: {profile.vehicle} / {profile.name} ({mode})", flush=True)
+        print(
+            f"Verified settings available: {len(readable)}; changes needed: {len(changes)}",
+            flush=True,
+        )
         for key in changes:
             print(f"  {readable[key].label}: {current[key]} -> {values[key]}")
         if not changes:
-            print("AB9 base settings already match this profile.")
+            print(
+                "AB9 base settings already match this profile. "
+                f"Check completed in {time.monotonic() - started:.1f}s.",
+                flush=True,
+            )
             return
 
         if not assume_ready:
             confirm_ready(profile)
 
         # Close the documented force-output gate before altering force layers.
+        muted_started = time.monotonic()
         ab9_control.write_value(fd, "Force-output disable gate", (0xDE,), 1, 2)
         output_muted = True
+        print(f"Force output muted; writing and verifying {len(changes)} settings.", flush=True)
         time.sleep(0.2)
 
         for key in changes:
@@ -426,14 +441,21 @@ def apply_profile(profile: Profile, mode: str, assume_ready: bool) -> None:
         ab9_control.write_value(fd, "FFB controller", (0xE1, 0x17), 1, 1)
         ab9_control.write_value(fd, "Force-output disable gate", (0xDE,), 0, 2)
         output_muted = False
-        print(f"Applied and verified {len(changes)} AB9 settings; force output restored.")
+        finished = time.monotonic()
+        print(
+            f"Applied and verified {len(changes)} AB9 settings; force output restored. "
+            f"Total {finished - started:.1f}s; muted for {finished - muted_started:.1f}s.",
+            flush=True,
+        )
     finally:
         os.close(fd)
         if output_muted:
             print(
                 "NOTICE: profile application did not restore force output. "
+                f"Elapsed {time.monotonic() - started:.1f}s. "
                 "The DCS launcher readiness check can reopen it after the cause is fixed.",
                 file=sys.stderr,
+                flush=True,
             )
 
 
