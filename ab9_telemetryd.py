@@ -101,12 +101,16 @@ def load_overrides() -> dict[str, dict[str, Any]]:
         document = json.loads(OVERRIDES_FILE.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return {}
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, ValueError) as exc:
         raise RuntimeError(f"could not read {OVERRIDES_FILE}: {exc}") from exc
+    if not isinstance(document, dict):
+        raise RuntimeError(f"{OVERRIDES_FILE}: overrides must be a JSON object")
     profiles = document.get("profiles", {})
     if not isinstance(profiles, dict):
         raise RuntimeError(f"{OVERRIDES_FILE}: 'profiles' must be an object")
-    return {key: value for key, value in profiles.items() if isinstance(value, dict)}
+    if any(not isinstance(value, dict) for value in profiles.values()):
+        raise RuntimeError(f"{OVERRIDES_FILE}: each profile override must be an object")
+    return profiles
 
 
 def parse_packet(packet: bytes) -> tuple[str, dict[str, str]]:
@@ -826,23 +830,33 @@ def serve(do_apply: bool, cap_percent: float, gain: float) -> int:
                         sink.clear()
                         mixer = None
                         current_aircraft = aircraft
-                        profiles = ab9_profile.load_profiles()
-                        overrides = load_overrides()
-                        profile = ab9_profiled.select_profile(profiles, aircraft)
-                        if profile is None:
-                            print(f"No copied telemetry profile for {aircraft!r}", flush=True)
-                        else:
-                            mixer = EffectMixer(
-                                profile,
-                                cap_percent,
-                                gain,
-                                overrides.get(profile.vehicle, {}),
-                            )
+                        try:
+                            profiles = ab9_profile.load_profiles(strict=True)
+                            overrides = load_overrides()
+                            profile = ab9_profiled.select_profile(profiles, aircraft)
+                            if profile is not None:
+                                mixer = EffectMixer(
+                                    profile,
+                                    cap_percent,
+                                    gain,
+                                    overrides.get(profile.vehicle, {}),
+                                )
+                        except (OSError, RuntimeError, ValueError) as exc:
                             print(
-                                f"Telemetry profile: {aircraft!r} -> "
-                                f"{profile.name} ({profile.source})",
+                                f"ERROR loading telemetry profile for {aircraft!r}: {exc}. "
+                                "Telemetry effects disabled until the next reload.",
+                                file=sys.stderr,
                                 flush=True,
                             )
+                        else:
+                            if profile is None:
+                                print(f"No copied telemetry profile for {aircraft!r}", flush=True)
+                            else:
+                                print(
+                                    f"Telemetry profile: {aircraft!r} -> "
+                                    f"{profile.name} ({profile.source})",
+                                    flush=True,
+                                )
                     if mixer is not None:
                         effects = mixer.update(telemetry, now)
                         sink.apply(effects)

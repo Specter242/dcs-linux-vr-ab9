@@ -193,12 +193,27 @@ over the preset in either naming scheme. This covers these fields; newer curve
 formats and other renamed effects still require separate validation.
 
 Both daemons reload copied presets when DCS reports a different aircraft. The
-telemetry daemon also reloads overrides at that point. To pick up an edit,
-switch to another aircraft and back while parked, or restart the relevant
-service with travel clear and no profile write in progress. Editing a file
-alone does not trigger an automatic base write. After a telemetry timeout, the
-listener clears effects and resets its event counters before processing new
-data, preventing a stale ammunition count from creating a new weapon pulse.
+telemetry daemon also reloads overrides at that point. After a telemetry gap
+longer than 0.5 seconds, it clears effects and reloads presets and overrides on the next
+packet, even for the same aircraft. An edit can therefore affect supplementary
+effects after a loading screen or hitch. Its event counters are reset so a
+stale ammunition count does not create a new weapon pulse. Automatic base-profile
+writes still require an aircraft transition; editing a file alone does not trigger one.
+
+To pick up an edit deliberately, switch to another aircraft and back while
+parked, or restart the relevant service with travel clear and no profile write
+in progress. The daemons require every copied preset file to be readable and
+valid before using the new set. A broken custom preset blocks the reload
+instead of silently selecting an official fallback; repair or remove the bad
+file identified in the log. `ab9_profile.py list` can still inspect readable
+presets while warning about invalid files.
+
+On a preset or override load error, telemetry clears its effects and stays
+running with supplementary output disabled for that aircraft. It retries on
+the next aircraft change, mission-stop/reset, or timeout followed by new data;
+it does not retry on every packet. A base-profile load error prevents new base
+writes and leaves the previous settings in place. After repairing a file,
+switch aircraft away and back or restart while parked to request another load.
 
 The reported loss of stick-axis input during aircraft changes is still
 unresolved. The profile timing logs can help identify a force-output pause;

@@ -34,6 +34,156 @@ def telemetry_packet(aircraft, shells):
 
 
 class ProfileReloadTests(unittest.TestCase):
+    def run_telemetry(self, root, packets, times=None):
+        sink = Mock()
+        sock = Mock()
+        handlers = {}
+        stream = iter(packets)
+        output = io.StringIO()
+        errors = io.StringIO()
+
+        def receive(size):
+            try:
+                packet = next(stream)
+            except StopIteration:
+                handlers[signal.SIGTERM](None, None)
+                packet = None
+            if packet is None:
+                raise socket.timeout
+            return packet, None
+
+        sock.recvfrom.side_effect = receive
+        with (
+            patch.object(ab9_profile, "PROFILE_ROOT", root),
+            patch.object(ab9_telemetryd, "OVERRIDES_FILE", root / "overrides.json"),
+            patch.object(ab9_telemetryd.socket, "socket", return_value=sock),
+            patch.object(ab9_telemetryd.signal, "signal", side_effect=handlers.__setitem__),
+            patch.object(ab9_telemetryd.time, "monotonic", side_effect=times, return_value=100.0),
+            patch.object(ab9_telemetryd, "DryRunSink", return_value=sink),
+            patch.object(ab9_telemetryd, "EvdevSink") as hardware,
+            contextlib.redirect_stdout(output),
+            contextlib.redirect_stderr(errors),
+        ):
+            self.assertEqual(ab9_telemetryd.serve(False, 15, 1), 0)
+        hardware.assert_not_called()
+        sink.close.assert_called_once()
+        sock.close.assert_called_once()
+        return sink, output.getvalue(), errors.getvalue()
+
+    def test_bad_override_reload_disables_effects_without_stopping_listener(self):
+        for bad_data in (b'{"profiles":', b'\xff', b'[]', b'{"profiles": []}', b'{"profiles": {"Mi-8MT": []}}'):
+            with self.subTest(data=bad_data), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                write_profile(root, "JF-17", 4)
+                write_profile(root, "Mi-8MT", 2)
+
+                def packets():
+                    yield telemetry_packet("JF-17", 100)
+                    yield telemetry_packet("JF-17", 99)
+                    (root / "overrides.json").write_bytes(bad_data)
+                    yield telemetry_packet("Mi-8MT", 100)
+                    yield telemetry_packet("Mi-8MT", 99)
+                    (root / "overrides.json").write_text("{}", encoding="utf-8")
+                    yield telemetry_packet("JF-17", 100)
+                    yield telemetry_packet("JF-17", 99)
+
+                sink, output, errors = self.run_telemetry(root, packets())
+                strengths = [
+                    args.args[0]["weapon"].percent
+                    for args in sink.apply.call_args_list if "weapon" in args.args[0]
+                ]
+                self.assertEqual(strengths, [4, 4])
+                self.assertEqual(errors.count("ERROR loading telemetry profile"), 1)
+                self.assertIn("overrides.json", errors)
+
+    def test_bad_preset_reload_does_not_fall_back_to_official(self):
+        for bad_data in (b'{"devices":', b'\xff', b'[]', b'{}'):
+            with self.subTest(data=bad_data), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                write_profile(root, "JF-17", 4)
+                write_profile(root, "Mi-8MT", 2)
+                custom = root / "custom" / "Mi-8MT.preset"
+                (root / "official").mkdir()
+                (root / "official" / custom.name).write_bytes(custom.read_bytes())
+
+                def packets():
+                    yield telemetry_packet("JF-17", 100)
+                    yield telemetry_packet("JF-17", 99)
+                    custom.write_bytes(bad_data)
+                    yield telemetry_packet("Mi-8MT", 100)
+                    yield telemetry_packet("Mi-8MT", 99)
+                    write_profile(root, "Mi-8MT", 6)
+                    yield telemetry_packet("JF-17", 100)
+                    yield telemetry_packet("JF-17", 99)
+                    yield telemetry_packet("Mi-8MT", 100)
+                    yield telemetry_packet("Mi-8MT", 99)
+
+                sink, output, errors = self.run_telemetry(root, packets())
+                strengths = [
+                    args.args[0]["weapon"].percent
+                    for args in sink.apply.call_args_list if "weapon" in args.args[0]
+                ]
+                self.assertEqual(strengths, [4, 4, 6])
+                self.assertEqual(errors.count("ERROR loading telemetry profile"), 1)
+                self.assertIn("Mi-8MT.preset", errors)
+
+    def test_telemetry_without_matching_preset_stays_running(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_profile(root, "JF-17", 4)
+            packets = [
+                telemetry_packet("JF-17", 100),
+                telemetry_packet("JF-17", 99),
+                telemetry_packet("Unknown", 100),
+                telemetry_packet("Unknown", 99),
+                telemetry_packet("JF-17", 100),
+                telemetry_packet("JF-17", 99),
+            ]
+            sink, output, errors = self.run_telemetry(root, packets)
+            self.assertEqual(output.count("No copied telemetry profile"), 1)
+            self.assertEqual(len(sink.apply.call_args_list), 4)
+            self.assertEqual(errors, "")
+
+    def test_profile_selector_refuses_broken_custom_preset_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_profile(root, "JF-17", 4)
+            write_profile(root, "Mi-8MT", 2, "Official fallback")
+            custom = root / "custom" / "Mi-8MT.preset"
+            (root / "official").mkdir()
+            (root / "official" / custom.name).write_bytes(custom.read_bytes())
+
+            def packets():
+                yield b"AB9_AIRCRAFT\tJF-17", None
+                custom.write_text('{"devices":', encoding="utf-8")
+                yield b"AB9_AIRCRAFT\tMi-8MT", None
+                yield b"AB9_AIRCRAFT\tMi-8MT", None
+                write_profile(root, "Mi-8MT", 6, "Repaired custom")
+                yield b"AB9_AIRCRAFT\tJF-17", None
+                yield b"AB9_AIRCRAFT\tMi-8MT", None
+
+            stream = packets()
+            sock = Mock()
+            sock.recvfrom.side_effect = lambda size: next(stream)
+            errors = io.StringIO()
+            with (
+                patch.object(ab9_profile, "PROFILE_ROOT", root),
+                patch.object(ab9_profiled, "armed", return_value=True),
+                patch.object(ab9_profiled.socket, "socket", return_value=sock),
+                patch.object(ab9_profiled.time, "sleep"),
+                patch.object(ab9_profile, "apply_profile") as hardware,
+                contextlib.redirect_stdout(io.StringIO()),
+                contextlib.redirect_stderr(errors),
+                self.assertRaises(StopIteration),
+            ):
+                ab9_profiled.listen(True, "native")
+            self.assertEqual(
+                [args.args[0].name for args in hardware.call_args_list],
+                ["Synthetic", "Synthetic", "Repaired custom"],
+            )
+            self.assertEqual(errors.getvalue().count("ERROR applying profile"), 1)
+            self.assertIn("Mi-8MT.preset", errors.getvalue())
+
     def test_aircraft_alias_does_not_hide_an_edited_profile(self):
         profile = ab9_profile.Profile("test", Path("synthetic.preset"), {
             "uuid": "shared",
@@ -146,46 +296,33 @@ class ProfileReloadTests(unittest.TestCase):
         else:
             hardware.assert_not_called()
 
-    def test_telemetry_timeout_resets_weapon_counter_baseline(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            write_profile(root, "JF-17", 4)
-            sink = Mock()
-            sock = Mock()
-            handlers = {}
+    def test_telemetry_timeout_reloads_files_and_resets_weapon_counter_baseline(self):
+        for use_override in (False, True):
+            with self.subTest(overrides=use_override), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                write_profile(root, "JF-17", 4)
 
-            def packets():
-                yield telemetry_packet("JF-17", 100), None
-                yield None
-                yield telemetry_packet("JF-17", 99), None
-                yield telemetry_packet("JF-17", 98), None
-                handlers[signal.SIGTERM](None, None)
-                yield None
+                def packets():
+                    yield telemetry_packet("JF-17", 100)
+                    yield telemetry_packet("JF-17", 99)
+                    write_profile(root, "JF-17", 6)
+                    if use_override:
+                        (root / "overrides.json").write_text(json.dumps({
+                            "profiles": {"JF-17": {"gun_vibration_intensity": 9}},
+                        }), encoding="utf-8")
+                    yield None
+                    yield telemetry_packet("JF-17", 98)
+                    yield telemetry_packet("JF-17", 97)
 
-            stream = packets()
-
-            def receive(size):
-                packet = next(stream)
-                if packet is None:
-                    raise socket.timeout
-                return packet
-
-            sock.recvfrom.side_effect = receive
-            with (
-                patch.object(ab9_profile, "PROFILE_ROOT", root),
-                patch.object(ab9_telemetryd, "OVERRIDES_FILE", root / "missing.json"),
-                patch.object(ab9_telemetryd.socket, "socket", return_value=sock),
-                patch.object(ab9_telemetryd.signal, "signal", side_effect=handlers.__setitem__),
-                patch.object(ab9_telemetryd.time, "monotonic", side_effect=[100, 101, 101.01, 101.02, 101.03]),
-                patch.object(ab9_telemetryd, "DryRunSink", return_value=sink),
-                patch.object(ab9_telemetryd, "EvdevSink") as hardware,
-                contextlib.redirect_stdout(io.StringIO()),
-            ):
-                ab9_telemetryd.serve(False, 15, 1)
-            effects = [args.args[0] for args in sink.apply.call_args_list]
-            self.assertEqual(effects[:2], [{}, {}])
-            self.assertEqual(effects[2]["weapon"].percent, 4)
-            hardware.assert_not_called()
+                sink, output, errors = self.run_telemetry(
+                    root, packets(), times=[100, 100.05, 101, 101.01, 101.02, 101.03],
+                )
+                effects = [args.args[0] for args in sink.apply.call_args_list]
+                self.assertEqual(effects[0], {})
+                self.assertEqual(effects[1]["weapon"].percent, 4)
+                self.assertEqual(effects[2], {})
+                self.assertEqual(effects[3]["weapon"].percent, 9 if use_override else 6)
+                self.assertEqual(errors, "")
 
 
 class ProfileApplicationTests(unittest.TestCase):

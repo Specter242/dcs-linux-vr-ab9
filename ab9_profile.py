@@ -182,7 +182,8 @@ SETTINGS = (
 SETTING_BY_KEY = {setting.key: setting for setting in SETTINGS}
 
 
-def load_profiles() -> list[Profile]:
+def load_profiles(*, strict: bool = False) -> list[Profile]:
+    """Inspect readable presets, or require a complete load for daemon use."""
     profiles: list[Profile] = []
     for source in ("official", "custom"):
         directory = PROFILE_ROOT / source
@@ -191,12 +192,27 @@ def load_profiles() -> list[Profile]:
         for path in sorted(directory.glob("*.preset")):
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError) as exc:
-                print(f"WARNING: cannot load {path}: {exc}", file=sys.stderr)
-                continue
-            if "AB9" not in data.get("devices", []):
-                continue
-            if "dcs_world" not in data.get("games", []):
+                if not isinstance(data, dict):
+                    raise ValueError("preset must be a JSON object")
+                devices = data.get("devices", [])
+                games = data.get("games", [])
+                if (
+                    not isinstance(devices, (list, str)) or not devices
+                    or not isinstance(games, (list, str)) or not games
+                ):
+                    raise ValueError("preset devices and games must be nonempty lists or strings")
+                if "AB9" not in devices or "dcs_world" not in games:
+                    continue
+                if not isinstance(data.get("vehicles"), str) or not data["vehicles"].strip():
+                    raise ValueError("preset vehicles must be a nonempty aircraft identifier")
+                for key in ("device_params", "telemetry_params"):
+                    if not isinstance(data.get(key, {}), dict):
+                        raise ValueError(f"preset {key} must be an object")
+            except (OSError, ValueError) as exc:
+                message = f"cannot load {path}: {exc}"
+                if strict:
+                    raise RuntimeError(message + "; refusing an incomplete preset load") from exc
+                print(f"WARNING: {message}", file=sys.stderr)
                 continue
             profiles.append(Profile(source, path, data))
     return profiles

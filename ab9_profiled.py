@@ -136,7 +136,7 @@ def listen(do_apply: bool, mode: str) -> None:
         try:
             # Reload only on an aircraft transition, never on each repeated
             # announcement: editing a file must not trigger live base writes.
-            profiles = ab9_profile.load_profiles()
+            profiles = ab9_profile.load_profiles(strict=True)
             last_profile = handle_aircraft(
                 aircraft, profiles, do_apply, mode, last_profile
             )
@@ -160,7 +160,7 @@ def main() -> int:
 
     if args.once:
         try:
-            profiles = ab9_profile.load_profiles()
+            profiles = ab9_profile.load_profiles(strict=True)
             handle_aircraft(args.once, profiles, args.apply, args.mode, None)
         except (OSError, RuntimeError, ValueError) as exc:
             print(f"ERROR: {exc}", file=sys.stderr)
