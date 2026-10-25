@@ -470,7 +470,7 @@ class EffectMixer:
             30.0 * dynamic_scale * speed_scale,
         ).bounded(self.cap_percent)
 
-        copied_damper = float(self.device_params.get("bacic_damper", 0) or 0)
+        copied_damper = number(self.device_params, "bacic_damper", 0)
         damper_max = min(15.0, copied_damper * 0.5)
         damper = ConditionSpec(
             ecodes.FF_DAMPER,

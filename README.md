@@ -194,19 +194,24 @@ formats and other renamed effects still require separate validation.
 
 Both daemons reload copied presets when DCS reports a different aircraft. The
 telemetry daemon also reloads overrides at that point. After a telemetry gap
-longer than 0.5 seconds, it clears effects and reloads presets and overrides on the next
-packet, even for the same aircraft. An edit can therefore affect supplementary
-effects after a loading screen or hitch. Its event counters are reset so a
-stale ammunition count does not create a new weapon pulse. Automatic base-profile
-writes still require an aircraft transition; editing a file alone does not trigger one.
+longer than 0.5 seconds, it clears effects and reloads presets and overrides on
+the next packet, even for the same aircraft. An edit can therefore affect
+supplementary effects after a loading screen or hitch. Its event counters are
+reset so a stale ammunition count does not create a new weapon pulse. Automatic
+base-profile writes still require an aircraft transition; editing a file alone
+does not trigger one.
 
 To pick up an edit deliberately, switch to another aircraft and back while
 parked, or restart the relevant service with travel clear and no profile write
-in progress. The daemons require every copied preset file to be readable and
-valid before using the new set. A broken custom preset blocks the reload
-instead of silently selecting an official fallback; repair or remove the bad
-file identified in the log. `ab9_profile.py list` can still inspect readable
-presets while warning about invalid files.
+in progress. The daemons and manual `ab9_profile.py apply` require readable JSON
+objects and valid parameter maps before using a new set. Presets for other
+devices or games are ignored. The existing string/list aircraft fields are
+accepted; an empty aircraft field matches no aircraft. A malformed custom
+preset blocks the load instead of silently selecting an official fallback;
+repair or remove the bad file identified in the log. Inspection commands such
+as `list` and `show` can still use readable presets while warning about invalid
+files. An invalid or non-finite dynamic damping value disables that telemetry
+damper instead of stopping the listener.
 
 On a preset or override load error, telemetry clears its effects and stays
 running with supplementary output disabled for that aircraft. It retries on

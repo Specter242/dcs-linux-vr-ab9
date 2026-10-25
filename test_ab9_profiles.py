@@ -34,6 +34,65 @@ def telemetry_packet(aircraft, shells):
 
 
 class ProfileReloadTests(unittest.TestCase):
+    def test_strict_loader_preserves_existing_vehicle_formats(self):
+        for vehicles in ("F-16C_50", ["F-16C_50"], ["F-16C_50", "F-16C_52"], "", [], [""]):
+            with self.subTest(vehicles=vehicles), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                write_profile(root, "Mi-8MT", 2)
+                (root / "custom" / "candidate.preset").write_text(json.dumps({
+                    "devices": ["AB9"], "games": ["dcs_world"],
+                    "vehicles": vehicles, "name": "Candidate",
+                }), encoding="utf-8")
+                with patch.object(ab9_profile, "PROFILE_ROOT", root):
+                    for strict in (False, True):
+                        profiles = ab9_profile.load_profiles(strict=strict)
+                        self.assertEqual(len(profiles), 2)
+                        self.assertIsNotNone(ab9_profiled.select_profile(profiles, "Mi-8MT"))
+                        if vehicles in ("F-16C_50", ["F-16C_50"]):
+                            selected = ab9_profiled.select_profile(profiles, "F-16C_50")
+                            self.assertIsNotNone(selected)
+                            self.assertEqual(selected.name, "Candidate")
+                        elif not vehicles or vehicles == [""]:
+                            self.assertIsNone(ab9_profiled.select_profile(profiles, "F-16C_50"))
+
+    def test_strict_loader_ignores_irrelevant_presets_before_validating_details(self):
+        irrelevant = (
+            {},
+            {"devices": []},
+            {"devices": ["R9"]},
+            {"devices": ["R9"], "games": None},
+            {"devices": ["AB9"], "games": ["msfs"], "vehicles": 123, "telemetry_params": []},
+        )
+        for data in irrelevant:
+            with self.subTest(data=data), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                write_profile(root, "Mi-8MT", 2)
+                (root / "custom" / "unrelated.preset").write_text(json.dumps(data), encoding="utf-8")
+                with patch.object(ab9_profile, "PROFILE_ROOT", root):
+                    for strict in (False, True):
+                        profiles = ab9_profile.load_profiles(strict=strict)
+                        self.assertEqual(len(profiles), 1)
+                        self.assertEqual(profiles[0].vehicle, "Mi-8MT")
+
+    def test_manual_apply_refuses_broken_custom_preset_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_profile(root, "Mi-8MT", 2)
+            custom = root / "custom" / "Mi-8MT.preset"
+            (root / "official").mkdir()
+            (root / "official" / custom.name).write_bytes(custom.read_bytes())
+            custom.write_text('{"devices":', encoding="utf-8")
+            errors = io.StringIO()
+            with (
+                patch.object(ab9_profile, "PROFILE_ROOT", root),
+                patch.object(ab9_profile.sys, "argv", ["ab9_profile.py", "apply", "Mi-8MT", "--yes"]),
+                patch.object(ab9_profile, "apply_profile") as hardware,
+                contextlib.redirect_stderr(errors),
+            ):
+                self.assertEqual(ab9_profile.main(), 1)
+            hardware.assert_not_called()
+            self.assertIn("Mi-8MT.preset", errors.getvalue())
+
     def run_telemetry(self, root, packets, times=None):
         sink = Mock()
         sock = Mock()
@@ -97,7 +156,10 @@ class ProfileReloadTests(unittest.TestCase):
                 self.assertIn("overrides.json", errors)
 
     def test_bad_preset_reload_does_not_fall_back_to_official(self):
-        for bad_data in (b'{"devices":', b'\xff', b'[]', b'{}'):
+        for bad_data in (
+            b'{"devices":', b'\xff', b'[]',
+            b'{"devices":["AB9"],"games":["dcs_world"],"vehicles":"Mi-8MT","telemetry_params":[]}',
+        ):
             with self.subTest(data=bad_data), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 write_profile(root, "JF-17", 4)

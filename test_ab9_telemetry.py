@@ -270,6 +270,16 @@ class TelemetryTests(unittest.TestCase):
         self.assertIsNotNone(strong)
         self.assertEqual(strong.percent, 35.0)
 
+    def test_malformed_damping_value_disables_damper_without_crashing(self):
+        for value in ("abc", None, {}, [], float("nan"), float("inf")):
+            with self.subTest(value=value):
+                profile = synthetic_profile()
+                profile.data["device_params"]["bacic_damper"] = value
+                mixer = EffectMixer(profile, 15.0)
+                effects = mixer.update(dict(BASELINE, ias="100"), 100.0)
+                self.assertIn("dynamic-spring", effects)
+                self.assertNotIn("dynamic-damper", effects)
+
     def test_dynamic_pressure_condition_effects(self):
         profile = synthetic_profile()
         mixer = EffectMixer(profile, 35.0, 2.0)

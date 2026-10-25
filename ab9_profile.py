@@ -195,16 +195,20 @@ def load_profiles(*, strict: bool = False) -> list[Profile]:
                 if not isinstance(data, dict):
                     raise ValueError("preset must be a JSON object")
                 devices = data.get("devices", [])
-                games = data.get("games", [])
-                if (
-                    not isinstance(devices, (list, str)) or not devices
-                    or not isinstance(games, (list, str)) or not games
-                ):
-                    raise ValueError("preset devices and games must be nonempty lists or strings")
-                if "AB9" not in devices or "dcs_world" not in games:
+                if not isinstance(devices, (list, str)):
+                    raise ValueError("preset devices must be a list or string")
+                if "AB9" not in devices:
                     continue
-                if not isinstance(data.get("vehicles"), str) or not data["vehicles"].strip():
-                    raise ValueError("preset vehicles must be a nonempty aircraft identifier")
+                games = data.get("games", [])
+                if not isinstance(games, (list, str)):
+                    raise ValueError("preset games must be a list or string")
+                if "dcs_world" not in games:
+                    continue
+                vehicles = data.get("vehicles", "")
+                if not isinstance(vehicles, (str, list)) or (
+                    isinstance(vehicles, list) and any(not isinstance(item, str) for item in vehicles)
+                ):
+                    raise ValueError("preset vehicles must be a string or list of strings")
                 for key in ("device_params", "telemetry_params"):
                     if not isinstance(data.get(key, {}), dict):
                         raise ValueError(f"preset {key} must be an object")
@@ -500,8 +504,8 @@ def main() -> int:
     )
 
     args = parser.parse_args()
-    profiles = load_profiles()
     try:
+        profiles = load_profiles(strict=args.command == "apply")
         if args.command == "list":
             list_profiles(profiles, args.filter)
         elif args.command == "status":
