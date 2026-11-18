@@ -161,6 +161,76 @@ Eyelash contact and optical residue were reported after the clarity tuning.
 Cleaning and face clearance are separate physical variables. Fit changes should
 be followed by a gaze-alignment check before collecting another comparison.
 
+## November 18, 2026: pipeline stages and tuning switches
+
+No new headset captures were taken on this date. The September metrics were
+re-analyzed, and the launcher gained switches for the next measured session.
+Kernel 7.3.4, Mesa 26.2.6, and Monado r1137 have replaced the September
+versions and have not yet run DCS in VR.
+
+### What the September captures show
+
+`dcs-vr-benchmark analyze` now also reports `application_fps` and three
+pipeline stages per frame: `wake_to_begin_ms`, `begin_to_submit_ms`, and
+`submit_to_gpu_done_ms`. DCS overlaps frames, so these are pipeline latency
+rather than serial cost.
+
+| Capture | App FPS | Fresh FPS | Wake to begin | Begin to submit | Submit to GPU done |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Original visuals, DCS cap 75 (repeat) | 74.3 | 65.90 | 5.90 ms | 8.17 ms | 3.00 ms |
+| Original visuals, cap removed (repeat) | 75.0 | 70.93 | 1.67 ms | 7.63 ms | 2.99 ms |
+| Clear profile (repeat) | 74.8 | 68.31 | 2.29 ms | 9.90 ms | 2.57 ms |
+| Clear profile, app margin 3 ms (repeat) | 74.5 | 71.63 | 2.19 ms | 10.90 ms | 1.80 ms |
+
+Stage values are means. DCS produced a frame for nearly every refresh in each
+window. The shortfall in fresh FPS comes from frames that finish slightly after
+their compositor latch, followed by two frames competing for the next one. It
+is a deadline problem, not a throughput problem. The DCS frame cap added about
+4 ms of idle time after each wake, which is why removing it helped.
+
+`gpu_done_lateness_ms` is the completion time relative to the pacer's
+deadline. Its median is within 0.3 ms of zero in the clear-profile and 3 ms
+margin repeats: Monado aims each frame at the deadline, and the app margin is the only slack. In the two
+clear-profile windows, 12-13% of frames were more than 2 ms late, 7-9% more
+than 3 ms, 2-3% more than 5 ms, and 1-2% more than 6 ms. Measured reuse was
+9% at the default 2 ms margin and 4.5-7% at 3 ms, so the distribution tracks
+the observed behavior. A 5 ms margin should leave roughly 2-3% reused latches
+at the cost of about 3 ms more pipeline latency. That prediction is untested.
+
+### Switches for the next session
+
+All defaults except the DXVK correction below preserve September behavior.
+
+```sh
+U_PACING_APP_MIN_MARGIN_MS=5 dcs-linux monado   # app margin; Monado default is 2
+DCS_GPU_POWER_PROFILE=vr dcs-linux monado       # amdgpu VR clocking for the session
+DCS_DXVK_BINDING=auto dcs-linux monado          # DXVK chooses (descriptor heap)
+```
+
+The launcher passes its environment to `monado-service`, so any Monado pacing
+variable can be set the same way.
+
+`DCS_GPU_POWER_PROFILE=vr` sets `power_dpm_force_performance_level` to
+`manual`, selects the profile named `VR` in `pp_power_profile_mode`, and
+restores the previous level and profile on exit. It needs non-interactive
+sudo. The motivation is that GPU busy stayed near 70% at about 120 W while
+frames missed deadlines, and the August snapshot recorded the core clock
+moving between 1.9 and 3.1 GHz. The set, hold, and restore sequence was
+verified on the idle desktop, including across LACT's settings timer. Its
+effect on frame delivery is unmeasured. Captures now record `gpu_clock_hz`
+to show the difference.
+
+The launcher's DXVK workaround had silently stopped applying. DXVK 3.1.0
+prefers `VK_EXT_descriptor_heap`, which Mesa 26.2 enables on RADV, so
+`dxvk.enableDescriptorBuffer = False` alone left DCS on the descriptor-heap
+path. A D3D11 probe under the DCS runtime logged `Binding model: Descriptor
+heap` with the old setting and `Binding model: Legacy` with both features
+disabled. The launcher now disables both, which restores the path validated
+in September. `DCS_DXVK_BINDING=auto` selects the heap path for comparison.
+
+Suggested order, one change per capture against a fresh baseline: baseline,
+app margin 5 ms, GPU VR profile, both together, then DXVK `auto`.
+
 ## Repeating a capture
 
 Monado supports metrics capture through `XRT_METRICS_FILE`:
