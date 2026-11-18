@@ -45,6 +45,27 @@ class FrameMetricsTests(unittest.TestCase):
         self.assertEqual(result["completion_to_first_latch_ms"]["mean"], 18)
         self.assertEqual(result["wake_to_latch_ms"]["max"], 25)
 
+    def test_phases_split_overlapping_pipeline_stages(self):
+        # Frames wake every 10 ms but take 14 ms to finish: stages overlap.
+        frames = [SimpleNamespace(when_wait_woke_ns=w, when_begin_ns=w + 2_000_000,
+                                  when_delivered_ns=w + 11_000_000, when_gpu_done_ns=w + 14_000_000,
+                                  predicted_gpu_done_time_ns=w + 14_000_000 - late, discarded=False)
+                  for w, late in [(0, -1_000_000), (10_000_000, 3_000_000), (20_000_000, 1_000_000)]]
+        frames.append(SimpleNamespace(when_wait_woke_ns=30_000_000, when_begin_ns=30_000_000,
+                                      when_delivered_ns=30_000_000, when_gpu_done_ns=31_000_000,
+                                      predicted_gpu_done_time_ns=0, discarded=True))
+        result = benchmark.phases(frames, 0, 40_000_000)
+        self.assertAlmostEqual(result["application_fps"], 100)
+        self.assertEqual(result["wake_to_begin_ms"]["mean"], 2)
+        self.assertEqual(result["begin_to_submit_ms"]["mean"], 9)
+        self.assertEqual(result["submit_to_gpu_done_ms"]["max"], 3)
+        self.assertEqual(result["gpu_done_lateness_ms"]["max"], 3)
+        self.assertEqual(result["gpu_done_lateness_ms"]["p50"], 1)
+
+    def test_phases_reject_a_window_without_frames(self):
+        with self.assertRaises(ValueError):
+            benchmark.phases([], 0, 1)
+
     def test_truncated_varint_is_rejected(self):
         with self.assertRaises(EOFError):
             benchmark.varint(bytes([128]), 0)

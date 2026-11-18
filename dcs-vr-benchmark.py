@@ -108,6 +108,33 @@ def summarize(frames, used, begin, end, hz):
     }
 
 
+def phases(frames, begin, end):
+    """Split each frame's pipeline time into its three recorded stages.
+
+    DCS overlaps frames: it calls xrWaitFrame for the next frame while its
+    render thread still submits the current one.  The stages are therefore
+    pipeline latency, not serial CPU cost, and their sum can exceed the
+    refresh period while the application still produces a frame every period.
+    """
+    frames = sorted((f for f in frames if begin <= f.when_gpu_done_ns < end and not f.discarded),
+                    key=lambda f: f.when_wait_woke_ns)
+    if len(frames) < 2:
+        raise ValueError("Capture contains too few application frames")
+    span = (frames[-1].when_wait_woke_ns - frames[0].when_wait_woke_ns) / 1e9
+    if span <= 0:
+        raise ValueError("Application wake timestamps must span a positive interval")
+    return {
+        "application_fps": (len(frames) - 1) / span,
+        "wake_to_begin_ms": distribution([(f.when_begin_ns - f.when_wait_woke_ns) / 1e6 for f in frames]),
+        "begin_to_submit_ms": distribution([(f.when_delivered_ns - f.when_begin_ns) / 1e6 for f in frames]),
+        "submit_to_gpu_done_ms": distribution([(f.when_gpu_done_ns - f.when_delivered_ns) / 1e6 for f in frames]),
+        # Positive values finished after the pacer's deadline.  The upper
+        # percentiles show how much extra app margin would have absorbed them.
+        "gpu_done_lateness_ms": distribution([(f.when_gpu_done_ns - f.predicted_gpu_done_time_ns) / 1e6
+                                              for f in frames]),
+    }
+
+
 def read_number(path):
     try:
         return int(path.read_text().strip())
@@ -131,7 +158,9 @@ def capture(args):
     fields = {"gpu_busy_percent": gpu / "gpu_busy_percent",
               "vram_bytes": gpu / "mem_info_vram_used", "vram_total_bytes": gpu / "mem_info_vram_total",
               "gtt_bytes": gpu / "mem_info_gtt_used", "power_microwatts": hw / "power1_average",
-              "junction_millicelsius": hw / "temp2_input"}
+              "junction_millicelsius": hw / "temp2_input",
+              # Core clock; shows whether power management holds the GPU at reduced speed.
+              "gpu_clock_hz": hw / "freq1_input"}
     mission_before = json.loads(args.mission_state.read_text()) if args.mission_state else None
     if mission_before and mission_before.get("paused"):
         raise ValueError("Unpause the mission before capturing flight performance")
@@ -169,6 +198,8 @@ def analyze(args):
     result = summarize([f for f in frames if f.session_id == sid],
                        [r.used for r in records if r.WhichOneof("record") == "used" and r.used.session_id == sid],
                        capture_data["start_monotonic_ns"], capture_data["end_monotonic_ns"], args.hz)
+    result.update(phases([f for f in frames if f.session_id == sid],
+                         capture_data["start_monotonic_ns"], capture_data["end_monotonic_ns"]))
     result.update(label=capture_data["label"], session_id=sid, session_frame_counts=counts,
                   hardware=capture_data["hardware"])
     args.output.write_text(json.dumps(result, indent=2) + "\n")
